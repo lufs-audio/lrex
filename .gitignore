@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock is committed for binaries (reproducible builds) — keep it tracked.
+
+# Recorded takes / local scratch
+/Recordings/
+*.wav
+*.mid
+!tests/fixtures/**/*.wav
+!tests/fixtures/**/*.mid
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
