@@ -1,0 +1,33 @@
+[package]
+name = "lufs-recorder"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Universal, agent-first CLI for recording any audio device's channels plus MIDI to a verified take."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/danialrami/lufs-recorder"
+authors = ["Daniel Ramirez <danialrami>"]
+readme = "README.md"
+keywords = ["audio", "midi", "recording", "cli", "multichannel"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[[bin]]
+name = "lufs-recorder"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+# Audio + MIDI backends land in v0.2 / v0.3 (see docs/product/lufs-recorder in
+# danialrami/agent-knowledge). Kept out of the v0.1 skeleton so it builds with no
+# system audio dev headers.
+# cpal   = "0.15"   # cross-platform device I/O (CoreAudio / WASAPI / ALSA / JACK)
+# midir  = "0.10"   # cross-platform MIDI input
+# hound  = "3"      # WAV writing
+
+[profile.release]
+opt-level = 3
+lto = true
