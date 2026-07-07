@@ -116,8 +116,9 @@ fn main() -> ExitCode {
 /// This lives in the binary (not just a docstring) so a fresh build can never be
 /// mistaken for a working recorder.
 fn not_implemented(command: &str, json: bool) -> ExitCode {
-    let message =
-        format!("`{command}` is not implemented yet (v0.1 skeleton). See CONTRACT.md and the roadmap.");
+    let message = format!(
+        "`{command}` is not implemented yet (v0.1 skeleton). See CONTRACT.md and the roadmap."
+    );
 
     if json {
         let payload = serde_json::json!({
