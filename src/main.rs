@@ -12,10 +12,18 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod channels;
+
 /// Exit-code taxonomy (see CONTRACT.md). Stable across versions.
+///
+/// Some variants are declared ahead of the code paths that return them (they land
+/// as `record`/`verify` are implemented), so the module is allowed dead code.
+#[allow(dead_code)]
 mod exit {
     /// Take captured AND verified.
     pub const OK: u8 = 0;
+    /// Bad usage / arguments (mirrors clap's own exit code).
+    pub const USAGE: u8 = 2;
     /// Requested audio device or MIDI port unavailable.
     pub const DEVICE_UNAVAILABLE: u8 = 3;
     /// Requested format (rate / bit-depth / channels) unsupported by the device.
@@ -102,14 +110,36 @@ struct RecordArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let command_name = match &cli.command {
-        Command::Devices => "devices",
-        Command::Record(_) => "record",
-        Command::Verify { .. } => "verify",
-    };
+    match &cli.command {
+        Command::Record(args) => {
+            // Validate --channels syntactically now; the capture itself is not yet
+            // implemented. (Checking the request against the device's real channel
+            // count arrives with cpal in v0.2.)
+            if let Some(spec) = &args.channels {
+                if let Err(err) = channels::parse_channel_spec(spec) {
+                    return bad_usage(&format!("--channels: {err}"), cli.json);
+                }
+            }
+            not_implemented("record", cli.json)
+        }
+        Command::Devices => not_implemented("devices", cli.json),
+        Command::Verify { .. } => not_implemented("verify", cli.json),
+    }
+}
 
-    // v0.1: no command is implemented. Fail honestly.
-    not_implemented(command_name, cli.json)
+/// Report a bad-usage error (exit code 2), honoring `--json`.
+fn bad_usage(detail: &str, json: bool) -> ExitCode {
+    if json {
+        let payload = serde_json::json!({
+            "error": "bad_usage",
+            "message": detail,
+            "exit_code": exit::USAGE,
+        });
+        println!("{payload}");
+    } else {
+        eprintln!("lufs-recorder: {detail}");
+    }
+    ExitCode::from(exit::USAGE)
 }
 
 /// The honest-failure sentinel. Prints a clear message and returns exit code 70.
@@ -131,15 +161,6 @@ fn not_implemented(command: &str, json: bool) -> ExitCode {
     } else {
         eprintln!("lufs-recorder: {message}");
     }
-
-    // Reference the rest of the taxonomy so it isn't dead code before v0.2 wires it in.
-    debug_assert_ne!(exit::OK, exit::NOT_IMPLEMENTED);
-    let _ = (
-        exit::DEVICE_UNAVAILABLE,
-        exit::FORMAT_UNSUPPORTED,
-        exit::CONTRACT_VIOLATION,
-        exit::INTERRUPTED,
-    );
 
     ExitCode::from(exit::NOT_IMPLEMENTED)
 }
