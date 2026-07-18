@@ -107,7 +107,7 @@ control surface that exercises it. The stable endpoint contract:
 | `GET /api/takes/<id>/file/<name>` | raw WAV/MIDI bytes (Web Audio decode / download) |
 | `POST /api/verify` | `{id}` or `{dir}` → manifest + verification |
 | `POST /api/record/start` | `{device?, tracks?|channels?, midi?, rate?, bit_depth?, name?}` |
-| `GET /api/record/status` | `{recording, name?, elapsed_s?}` |
+| `GET /api/record/status` | `{recording, name?, elapsed_s?, frames?, xruns?, levels?}` — `levels[]` is per-track `{name,peak_dbfs,rms_dbfs}`, live while recording (monitoring) |
 | `POST /api/record/stop` | stop → `{stopped, id, take: manifest}` |
 
 The browser is a *control surface*, not the capture engine — multichannel + MIDI capture stays in

@@ -18,7 +18,8 @@
 //!   GET  /api/takes/<id>/file/<name> -> raw WAV/MIDI bytes (Web Audio / download)
 //!   POST /api/verify           -> { id } | { dir } -> manifest + verification
 //!   POST /api/record/start     -> { device?, tracks?|channels?, midi?, rate?, bit_depth?, name? }
-//!   GET  /api/record/status    -> { recording, name?, elapsed_s? }
+//!   GET  /api/record/status    -> { recording, name?, elapsed_s?, frames?, xruns?, levels? }
+//!        (levels[]: per-track {name, peak_dbfs, rms_dbfs} live while recording)
 //!   POST /api/record/stop      -> { stopped, id, take: manifest }
 //!
 //! Recording currently shells out to `lufs-recorder record` and stops it with
@@ -37,7 +38,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -58,6 +59,9 @@ struct AppState {
     out_dir: PathBuf,
     exe: PathBuf,
     rec: Mutex<Option<RecordState>>,
+    /// Latest live progress snapshot ({elapsed_s, frames, xruns, levels[]})
+    /// parsed from the record subprocess's NDJSON while recording.
+    live: Arc<Mutex<Option<Value>>>,
 }
 
 pub fn serve(
@@ -76,6 +80,7 @@ pub fn serve(
         out_dir,
         exe,
         rec: Mutex::new(None),
+        live: Arc::new(Mutex::new(None)),
     });
 
     let addr = format!("127.0.0.1:{port}");
@@ -481,9 +486,28 @@ fn api_status(state: &AppState) -> Value {
         if let Ok(Some(_)) = r.child.try_wait() {
             let name = r.name.clone();
             *guard = None;
+            *state.live.lock().unwrap() = None;
             return json!({ "recording": false, "last": name, "note": "record process exited on its own" });
         }
-        return json!({ "recording": true, "name": r.name, "elapsed_s": r.started.elapsed().as_secs_f64() });
+        // Merge the latest live snapshot (per-track peak/RMS, frames, xruns) so
+        // the UI can drive meters/scopes while recording.
+        let snapshot = state.live.lock().unwrap().clone();
+        let (frames, xruns, levels) = match &snapshot {
+            Some(v) => (
+                v.get("frames").cloned().unwrap_or(json!(0)),
+                v.get("xruns").cloned().unwrap_or(json!(0)),
+                v.get("levels").cloned().unwrap_or(json!([])),
+            ),
+            None => (json!(0), json!(0), json!([])),
+        };
+        return json!({
+            "recording": true,
+            "name": r.name,
+            "elapsed_s": r.started.elapsed().as_secs_f64(),
+            "frames": frames,
+            "xruns": xruns,
+            "levels": levels,
+        });
     }
     json!({ "recording": false })
 }
@@ -515,7 +539,9 @@ fn api_record_start(state: &AppState, body: &str) -> Result<Value> {
         serde_json::from_str(body).context("parsing record/start body")?
     };
 
-    let mut args: Vec<String> = vec!["record".to_string()];
+    // `--json` so the child emits NDJSON progress (with per-track levels) that we
+    // relay for live monitoring; the take still lands on disk for `stop` to read.
+    let mut args: Vec<String> = vec!["--json".to_string(), "record".to_string()];
     if let Some(p) = &state.config_path {
         args.push("--config".to_string());
         args.push(p.display().to_string());
@@ -555,10 +581,29 @@ fn api_record_start(state: &AppState, body: &str) -> Result<Value> {
         args.push(ch.clone());
     }
 
-    let child = Command::new(&state.exe)
+    // Fresh monitoring state for this take.
+    *state.live.lock().unwrap() = None;
+
+    let mut child = Command::new(&state.exe)
         .args(&args)
+        .stdout(Stdio::piped())
         .spawn()
         .context("spawning record process")?;
+
+    // Reader thread: parse the child's NDJSON progress into the live snapshot.
+    if let Some(stdout) = child.stdout.take() {
+        let live = state.live.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(std::result::Result::ok) {
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if v.get("event").and_then(|e| e.as_str()) == Some("progress") {
+                        *live.lock().unwrap() = Some(v);
+                    }
+                }
+            }
+        });
+    }
 
     *guard = Some(RecordState {
         child,
@@ -606,6 +651,7 @@ fn api_record_stop(state: &AppState) -> Result<Value> {
 
     interrupt(rec.child.id());
     let _ = rec.child.wait();
+    *state.live.lock().unwrap() = None;
 
     let take_dir = newest_take(&state.out_dir).ok_or_else(|| {
         anyhow!(
