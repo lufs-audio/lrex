@@ -355,7 +355,8 @@ var REVIEW={id:null,byTrack:{},notes:[],dur:0};
 var t0=0;
 
 /* ============ display tuning (Shift+D) — display-only, never touches captured audio ============ */
-var VIZ_DEF={oscGain:3,specGain:2.2,meterFloor:-60,meterCeil:0,smooth:0.6};
+/* defaults match the demo drafts exactly (1x = raw); tune up per real signal via Shift+D */
+var VIZ_DEF={oscGain:1,specGain:1,meterFloor:-60,meterCeil:0,smooth:0.6,timeZoom:1};
 function loadViz(){try{var s=JSON.parse(localStorage.getItem('lufs-recorder-viz'));if(s)return Object.assign({},VIZ_DEF,s);}catch(e){}return Object.assign({},VIZ_DEF);}
 var VIZ=loadViz();
 function saveViz(){try{localStorage.setItem('lufs-recorder-viz',JSON.stringify(VIZ));}catch(e){}}
@@ -404,7 +405,7 @@ function prof(name){var i=TRACKS.findIndex(function(t){return t.name===name;});
   if(i===1)return{parts:[[1,.6],[2,.34],[3.01,.2],[5.02,.12]],noise:.05,amp:.92,pk:[[0.12,.04,.9],[0.3,.05,.55],[0.55,.06,.35]]};
   if(i===0)return{parts:[[1,.55],[2.01,.28],[3.02,.14]],noise:.16,amp:1,pk:[[0.08,.05,.8],[0.22,.07,.5]]};
   return{parts:[[1,.4],[2.5,.2],[4,.1]],noise:.24,amp:.6,pk:[[0.05,.06,.6],[0.4,.12,.35]]};}
-function synthSample(seed,pp,i,n,amp){var t=phase*(0.9+seed*0.05)+i/n*0.05,s=0;
+function synthSample(seed,pp,i,n,amp){var t=phase*(0.9+seed*0.05)+i/n*0.05*(VIZ.timeZoom||1),s=0;
   pp.parts.forEach(function(h){s+=Math.sin(t*6.283*h[0]+seed)*h[1];});
   s=s*(0.6+0.4*Math.sin(phase*1.7+seed))+(Math.random()*2-1)*pp.noise;return Math.max(-1,Math.min(1,s*amp*pp.amp));}
 function synthSpectrum(pp,bins,amp){var a=new Array(bins);for(var k=0;k<bins;k++){var f=k/bins,v=Math.pow(1-f,1.8)*.5;
@@ -427,9 +428,11 @@ function fit(cv){var r=cv.getBoundingClientRect();if(!r.width)return null;
 function makeSpectrogram(cv,specFn){var buf=document.createElement('canvas'),g;
   function ensure(){var r=cv.getBoundingClientRect();if(!r.width)return false;var mob=innerWidth<=600;var h=+((mob&&cv.dataset.mh)?cv.dataset.mh:cv.getAttribute('height'));
     if(buf.width!==Math.round(r.width)||buf.height!==h){buf.width=Math.max(2,Math.round(r.width));buf.height=h;g=buf.getContext('2d');g.fillStyle='#0c0c0c';g.fillRect(0,0,buf.width,buf.height);}return true;}
+  var acc=0;
   return function(amp,specArr){if(!ensure())return;var w=buf.width,h=buf.height;
-    g.drawImage(buf,-2,0);g.fillStyle='#0c0c0c';g.fillRect(w-2,0,2,h);
-    if(amp>0.005){var s=specArr||(specFn?specFn(h,amp):null);if(s)for(var y=0;y<h;y++){g.fillStyle=heat(s[Math.min(s.length-1,y)]*VIZ.specGain);g.fillRect(w-2,h-1-y,2,1);}}
+    acc+=2/(VIZ.timeZoom||1);var adv=Math.floor(acc);   /* time knob: lower px/frame = more history shown */
+    if(adv>0){acc-=adv;g.drawImage(buf,-adv,0);g.fillStyle='#0c0c0c';g.fillRect(w-adv,0,adv,h);
+      if(amp>0.005){var s=specArr||(specFn?specFn(h,amp):null);if(s)for(var y=0;y<h;y++){g.fillStyle=heat(s[Math.min(s.length-1,y)]*VIZ.specGain);g.fillRect(w-adv,h-1-y,adv,1);}}}
     var o=fit(cv);if(o)o.x.drawImage(buf,0,0,w,h,0,0,o.w,o.h);};}
 function grid(x,w,h){x.strokeStyle='rgba(251,249,226,.06)';x.lineWidth=1;for(var gx=0;gx<w;gx+=w/8){x.beginPath();x.moveTo(gx,0);x.lineTo(gx,h);x.stroke();}x.beginPath();x.moveTo(0,h/2);x.lineTo(w,h/2);x.stroke();}
 function flatline(cv){var o=fit(cv);if(!o)return;var x=o.x,w=o.w,h=o.h;x.clearRect(0,0,w,h);grid(x,w,h);
@@ -582,7 +585,7 @@ async function startRec(){
 function applyLive(s){
   if(typeof s.elapsed_s==='number')LIVE.elapsed=s.elapsed_s;
   if(typeof s.xruns==='number')LIVE.xruns=s.xruns;if(typeof s.frames==='number')LIVE.frames=s.frames;
-  (s.levels||[]).forEach(function(l){LIVE.byTrack[l.name]={pk:l.peak_dbfs,rms:l.rms_dbfs,wave:l.wave||[]};});
+  (s.levels||[]).forEach(function(l){var pt=LIVE.byTrack[l.name]||{};pt.pk=l.peak_dbfs;pt.rms=l.rms_dbfs;pt.wave=l.wave||[];pt.hist=(pt.hist||[]).concat(pt.wave);if(pt.hist.length>6000)pt.hist=pt.hist.slice(pt.hist.length-6000);LIVE.byTrack[l.name]=pt;});
   /* live MIDI (pending backend): light the 88-key roll from note-ons in this frame, or a held-note list. */
   if(Array.isArray(s.notes)){s.notes.forEach(function(nn){var key=(nn&&nn.key!=null)?nn.key:nn;if(key>=NOTE_LOW&&key<=NOTE_HIGH)noteLit[key]=Math.max(noteLit[key]||0,(nn&&nn.vel)?Math.max(0.25,nn.vel/127):1);});}
   else if(Array.isArray(s.active)){s.active.forEach(function(key){if(key>=NOTE_LOW&&key<=NOTE_HIGH)noteLit[key]=1;});}
@@ -666,14 +669,14 @@ function loop(now){var dt=(now-last)/1000;last=now;
     var mix=document.querySelector('#s-vmode button.on').dataset.m==='mix';
     if(mix){
       if(DEMO)drawLine(document.getElementById('s-osc'),function(i,n,a){var s=0;TRACKS.forEach(function(t){s+=synthSample(TRACKS.indexOf(t)+1,prof(t.name),i,n,a);});return Math.max(-1,Math.min(1,s*0.5));},amp,'rgba(120,190,186,.95)','rgba(231,178,37,.5)');
-      else drawEnvelope(document.getElementById('s-osc'),mixWave(),'rgb(120,190,186)');
+      else drawEnvelope(document.getElementById('s-osc'),mixSeg(),'rgb(120,190,186)');
       if(DEMO)mixSpectro(amp);else mixSpectro(recording?0.5:0,recording?waveToSpec(mixWave(),(innerWidth<=600?96:140)):null);
       document.getElementById('s-mixpeak').textContent=amp<0.02&&!recording?'—':fmtDbAmp(Math.max(0.001,amp*0.9));
     } else {
       TRACKS.forEach(function(t,idx){
         var oc=document.getElementById('s-osc-'+idx);
         if(DEMO)drawLine(oc,function(i,n,a){return synthSample(idx+1,prof(t.name),i,n,a);},amp,trackColor(idx));
-        else drawEnvelope(oc,(STATE==='review'?(REVIEW.byTrack[t.name]||{}).wave:(LIVE.byTrack[t.name]||{}).wave)||null,hexToRgb(trackColor(idx)));
+        else drawEnvelope(oc,oscSeg(t.name),hexToRgb(trackColor(idx)));
         if(!trackSpectros[idx]){var sc=document.getElementById('s-spec-'+idx);if(sc)trackSpectros[idx]=makeSpectrogram(sc,(function(P){return function(bins,a){return synthSpectrum(P,bins,a);};})(prof(t.name)));}
         if(trackSpectros[idx]){if(DEMO)trackSpectros[idx](amp);else{var wv=(STATE==='review'?(REVIEW.byTrack[t.name]||{}).wave:(LIVE.byTrack[t.name]||{}).wave);trackSpectros[idx](wv&&wv.length?0.5:0,wv&&wv.length?waveToSpec(wv,(innerWidth<=600?52:88)):null);}}
         var pl=document.querySelector('[data-tpk="'+idx+'"]');if(pl){var pk=DEMO?(recording?Math.abs(synthSample(idx+1,prof(t.name),5,32,amp)):0):(LIVE.byTrack[t.name]?Math.pow(10,(LIVE.byTrack[t.name].pk||-120)/20):0);pl.textContent=(pk?fmtDbAmp(pk)+' dBFS':'—');}
@@ -690,6 +693,10 @@ function mixWave(){var out=null;for(var k in LIVE.byTrack){var w=(STATE==='revie
   if(STATE==='review'){out=null;for(var k2 in REVIEW.byTrack){var w2=REVIEW.byTrack[k2].wave;if(!w2)continue;if(!out)out=w2.slice();else for(var j=0;j<out.length&&j<w2.length;j++)out[j]=Math.max(-1,Math.min(1,out[j]+w2[j]));}}
   return out;}
 function hexToRgb(h){var n=parseInt(h.slice(1),16);return'rgb('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+')';}
+/* time knob: live oscilloscope shows the last (512 * timeZoom) points of the rolling wave history */
+function oscSeg(name){if(STATE==='review'){return (REVIEW.byTrack[name]||{}).wave||null;}
+  var hh=(LIVE.byTrack[name]||{}).hist;if(!hh||!hh.length)return null;var win=Math.round(512*(VIZ.timeZoom||1));return hh.slice(Math.max(0,hh.length-win));}
+function mixSeg(){var out=null;TRACKS.forEach(function(t){var s=oscSeg(t.name);if(!s)return;if(!out)out=s.slice();else{var m=Math.min(out.length,s.length),i;for(i=0;i<m;i++)out[out.length-1-i]=Math.max(-1,Math.min(1,out[out.length-1-i]+s[s.length-1-i]));}});return out;}
 
 var mixSpectro,consoleSpectro;
 function initSpectros(){mixSpectro=makeSpectrogram(document.getElementById('s-spec'),function(bins,amp){var out=new Array(bins).fill(0);TRACKS.forEach(function(t){var s=synthSpectrum(prof(t.name),bins,amp);for(var i=0;i<bins;i++)out[i]=Math.min(1,out[i]+s[i]*0.6);});return out;});
@@ -701,7 +708,8 @@ var TUNER_PARAMS=[
   {key:'specGain',label:'spectro gain',min:0.5,max:8,step:0.1,unit:'x'},
   {key:'meterFloor',label:'meter floor',min:-90,max:-24,step:1,unit:'dB'},
   {key:'meterCeil',label:'meter ceil',min:-18,max:6,step:1,unit:'dB'},
-  {key:'smooth',label:'ballistics',min:0,max:0.95,step:0.05,unit:''}
+  {key:'smooth',label:'ballistics',min:0,max:0.95,step:0.05,unit:''},
+  {key:'timeZoom',label:'time',min:1,max:8,step:0.5,unit:'x'}
 ];
 function fmtVal(p,v){return p.unit==='x'?v.toFixed(1)+'×':(p.unit==='dB'?(v>0?'+':'')+v.toFixed(0)+' dB':v.toFixed(2));}
 function knobDeg(p,v){return -135+((v-p.min)/(p.max-p.min))*270;}
