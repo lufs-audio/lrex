@@ -9,9 +9,11 @@ lufs-recorder generalizes the Max/MSP patch [`midi-audio-recorder`](https://gith
 into a portable command-line tool. It is built in **Rust** and is our first production Rust
 project — a deliberate flight test for reliability-critical audio tooling in a systems language.
 
-**Status: `v0.2` — single-device capture with MIDI, at parity with the maxpatch.** `record`,
-`verify`, `devices`, and `init-config` are implemented. A take is captured *and verified against
-the contract* before it is declared good; a take that dropped frames fails by design.
+**Status: `v0.4` — single-device recorder, verified, with a browser control UI.** The CLI
+(`record`, `verify`, `devices`, `selftest`, `init-config`) plus `serve` — a local JSON API + a
+finalized browser front end (Setup · Console · Scope · Glance) with live monitoring. A take is
+captured *and verified against the contract* before it is declared good; a take that dropped frames
+fails by design.
 
 ## Why it exists
 
@@ -93,8 +95,11 @@ lufs-recorder serve --frontend ./frontend   # live-edit the UI without rebuildin
 
 ### HTTP API (for a real frontend)
 
-`serve` exposes a small JSON API on `127.0.0.1`; the bundled page at `/` is a *throwaway*
-control surface that exercises it. The stable endpoint contract:
+`serve` exposes a small JSON API on `127.0.0.1` and, at `/`, the finalized browser control UI
+(built on the LUFS brand system: Setup · Console · Scope · Glance, live meters + a real
+oscilloscope over SSE, per-track/mix scopes, an 88-key MIDI roll, the verification checklist, and
+`selftest`). The page is embedded in the binary (`--frontend <dir>` overrides it for live UI work).
+The stable endpoint contract:
 
 | Method + path | Purpose |
 |---|---|
@@ -111,7 +116,7 @@ control surface that exercises it. The stable endpoint contract:
 | `GET /api/record/stream` | Server-Sent Events: pushes the live snapshot ~12×/s (meters + a decimated `wave[]` peak envelope for a real live scope) |
 | `POST /api/record/stop` | stop → `{stopped, id, take: manifest}` |
 
-The browser is a *control surface*, not the capture engine — multichannel + MIDI capture stays in
+The browser is a *control surface*, not the capture engine — multichannel + MIDI capture stay in
 the binary. Recording over HTTP currently drives the `record` subprocess (SIGINT to finalize); the
 API is stable regardless of that detail.
 
@@ -164,8 +169,12 @@ in the shared knowledge base:
 - **v0.2.x** — `~/.config` standard path; MIDI→audio anchor + latency comp; hanging-note closure;
   arbitrary named tracks (`--track`), multi-port MIDI; in-process `selftest` fixture.
 - **v0.3** — A/V-offset gating (sane-bound on the live take; math gated by `selftest`); `serve`
-  local control UI + JSON API (throwaway frontend + stable endpoints). *(you are here)*
-- **v0.4** — a real frontend (Amacher) over the `serve` API; NDJSON progress polish; FLAC output.
+  local control UI + JSON API; take-visualization endpoints (`/notes`, `/waveform`, `/file`). *(done)*
+- **v0.4** — live monitoring: per-track peak/RMS + a decimated waveform envelope over
+  `GET /api/record/status` and SSE `GET /api/record/stream`; the finalized brand-native browser
+  front end (Setup · Console · Scope · Glance). *(you are here)*
+- **Later** — NDJSON progress polish; FLAC output; optional live spectrograph bands + live MIDI in
+  the stream. **Tier 2 / post-v1:** multi-device simultaneous capture (clock-drift physics).
 - **v1.0** — hardening, macOS + Linux static binaries, CI running the contract end-to-end.
 - **Tier 2 (best-effort, post-v1)** — multi-device simultaneous capture via per-OS backends, with
   documented clock-drift risk. Does *not* gate v1.
