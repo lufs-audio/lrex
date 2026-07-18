@@ -127,8 +127,12 @@ pub fn validate_bit_depth(s: &str) -> Result<()> {
 }
 
 /// The default config file location: ~/.config/lufs-recorder/config.toml.
+///
+/// Standardized on `~/.config` on every platform — shell-friendly (no spaces
+/// like macOS's "Application Support") and consistent across machines. The
+/// `--config` flag and `$LUFS_RECORDER_CONFIG` still override it.
 pub fn default_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("lufs-recorder").join("config.toml"))
+    dirs::home_dir().map(|h| h.join(".config").join("lufs-recorder").join("config.toml"))
 }
 
 fn resolve_path(explicit: Option<&Path>) -> Option<PathBuf> {

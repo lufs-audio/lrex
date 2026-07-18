@@ -131,8 +131,14 @@ fn wav_spec(channels: u16, sample_rate: u32, bit_depth: &str) -> hound::WavSpec 
 }
 
 /// Pre-flight: resolve device + format (real exit codes) and print the plan
-/// without capturing.
-pub fn dry_run(cfg: &Config, args: &cli::RecordArgs, json: bool) -> crate::error::Result<()> {
+/// without capturing. `config_source` is the config file actually loaded (or
+/// `None` for built-in defaults), reported so the active config is unambiguous.
+pub fn dry_run(
+    cfg: &Config,
+    args: &cli::RecordArgs,
+    json: bool,
+    config_source: Option<&std::path::Path>,
+) -> crate::error::Result<()> {
     let plan = resolve_plan(cfg, args)?;
     let device =
         devices::resolve_input_device(&plan.device_query).map_err(ExitError::DeviceUnavailable)?;
@@ -165,10 +171,15 @@ pub fn dry_run(cfg: &Config, args: &cli::RecordArgs, json: bool) -> crate::error
             "midi_ports": midi_ports,
             "out_dir": plan.out_dir,
             "duration_s": plan.duration,
+            "config": config_source.map(|p| p.display().to_string()),
         });
         println!("{payload}");
     } else {
         println!("dry-run OK — would record:");
+        match config_source {
+            Some(p) => println!("  config : {}", p.display()),
+            None => println!("  config : (built-in defaults)"),
+        }
         println!(
             "  device : {dev_name} ({} ch @ {} Hz, {})",
             chosen.channels,
