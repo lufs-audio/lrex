@@ -9,19 +9,27 @@ use crate::clock::SessionClock;
 use anyhow::{Context, Result};
 use midir::{MidiInput, MidiInputConnection};
 use midly::live::LiveEvent;
-use midly::num::{u15, u24, u28};
+use midly::num::{u28, u4, u7};
 use midly::{
-    Format, Header, MetaMessage, MidiMessage, Smf, Timing, Track, TrackEvent, TrackEventKind,
+    Format, Fps, Header, MetaMessage, MidiMessage, Smf, Timing, Track, TrackEvent, TrackEventKind,
 };
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
 
-/// SMF timing: 480 ticks/quarter at a nominal 120 BPM, so 960 ticks/second.
-/// A recorder captures absolute time; the metrical framing is a DAW-friendly
-/// default (the wall-clock spacing of events is preserved at 120 BPM).
-const TPQN: u16 = 480;
-const TICKS_PER_SECOND: f64 = TPQN as f64 * 2.0;
-const DEFAULT_TEMPO_US_PER_QN: u32 = 500_000; // 120 BPM
+/// SMPTE **absolute** timing: 25 fps × 40 subframes = 1000 ticks/second
+/// (1 ms/tick). A recorder captures wall-clock time, not metrical music — SMPTE
+/// division means the events carry absolute time, so no DAW project tempo can
+/// stretch a captured take (metrical SMF gets conformed to the project tempo,
+/// which desynced audio vs. MIDI). See design suite `02-research-and-landscape`.
+const SMPTE_FPS: Fps = Fps::Fps25;
+const SMPTE_SUBFRAMES: u8 = 40;
+const TICKS_PER_SECOND: f64 = 1000.0;
+
+/// Convert nanoseconds (relative to the MIDI anchor) to SMPTE ms-ticks.
+fn tick_of(rel_ns: u128) -> u64 {
+    ((rel_ns as f64) / 1e9 * TICKS_PER_SECOND).round() as u64
+}
 
 /// A raw MIDI message stamped against the session clock.
 pub struct RawMidiEvent {
@@ -124,23 +132,49 @@ impl MidiCapture {
 /// Counts derived from a captured MIDI stream.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MidiCounts {
+    /// Channel-voice messages actually captured (excludes synthesized offs).
     pub events: u64,
     pub note_ons: u64,
+    /// Explicit note-offs captured **plus** synthesized end-of-take offs.
     pub note_offs: u64,
+    /// Note-offs synthesized for notes still held when capture stopped.
+    pub synthesized_offs: u64,
+}
+
+/// Append a track event, computing its delta from `prev_tick`.
+fn push_event<'a>(
+    track: &mut Vec<TrackEvent<'a>>,
+    prev_tick: &mut u64,
+    tick: u64,
+    kind: TrackEventKind<'a>,
+) {
+    let delta = tick.saturating_sub(*prev_tick);
+    *prev_tick = tick;
+    track.push(TrackEvent {
+        delta: u28::from_int_lossy(delta.min(u32::MAX as u64) as u32),
+        kind,
+    });
 }
 
 /// Write captured events to a Standard MIDI File and return the counts.
-pub fn write_smf(path: &Path, events: &[RawMidiEvent]) -> Result<MidiCounts> {
+///
+/// `anchor_ns` is subtracted from every event's session-relative offset so the
+/// MIDI timeline shares its zero with audio sample 0 (pass `audio_t0 −
+/// input_latency`); this is the input-latency compensation that aligns MIDI to
+/// what you hear. `end_ns` is the take end (session-relative) where note-offs
+/// are synthesized for any notes still held when capture stopped — DAW punch-out
+/// behavior, so the file is valid and note-ons balance note-offs.
+pub fn write_smf(
+    path: &Path,
+    events: &[RawMidiEvent],
+    anchor_ns: u128,
+    end_ns: u128,
+) -> Result<MidiCounts> {
     let mut track: Track = Vec::new();
-    track.push(TrackEvent {
-        delta: u28::from_int_lossy(0),
-        kind: TrackEventKind::Meta(MetaMessage::Tempo(u24::from_int_lossy(
-            DEFAULT_TEMPO_US_PER_QN,
-        ))),
-    });
-
     let mut counts = MidiCounts::default();
     let mut prev_tick: u64 = 0;
+    // Notes currently sounding, so we can close any still held at capture end.
+    let mut held: BTreeSet<(u8, u8)> = BTreeSet::new();
 
     for ev in events {
         let parsed = match LiveEvent::parse(&ev.data) {
@@ -149,36 +183,59 @@ pub fn write_smf(path: &Path, events: &[RawMidiEvent]) -> Result<MidiCounts> {
         };
         if let LiveEvent::Midi { channel, message } = parsed {
             match message {
-                MidiMessage::NoteOn { vel, .. } => {
+                MidiMessage::NoteOn { key, vel } => {
                     if vel.as_int() > 0 {
                         counts.note_ons += 1;
+                        held.insert((channel.as_int(), key.as_int()));
                     } else {
                         counts.note_offs += 1; // note-on vel 0 == note-off
+                        held.remove(&(channel.as_int(), key.as_int()));
                     }
                 }
-                MidiMessage::NoteOff { .. } => counts.note_offs += 1,
+                MidiMessage::NoteOff { key, .. } => {
+                    counts.note_offs += 1;
+                    held.remove(&(channel.as_int(), key.as_int()));
+                }
                 _ => {}
             }
-            let tick = (ev.offset_ns as f64 / 1e9 * TICKS_PER_SECOND).round() as u64;
-            let delta = tick.saturating_sub(prev_tick);
-            prev_tick = tick;
-            track.push(TrackEvent {
-                delta: u28::from_int_lossy(delta.min(u32::MAX as u64) as u32),
-                kind: TrackEventKind::Midi { channel, message },
-            });
+            let tick = tick_of(ev.offset_ns.saturating_sub(anchor_ns));
+            push_event(
+                &mut track,
+                &mut prev_tick,
+                tick,
+                TrackEventKind::Midi { channel, message },
+            );
             counts.events += 1;
         }
     }
 
-    track.push(TrackEvent {
-        delta: u28::from_int_lossy(0),
-        kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
-    });
+    // Close notes still held at capture end (never before their note-on).
+    let end_tick = tick_of(end_ns.saturating_sub(anchor_ns)).max(prev_tick);
+    for (channel, key) in held.iter().copied() {
+        let kind = TrackEventKind::Midi {
+            channel: u4::from_int_lossy(channel),
+            message: MidiMessage::NoteOff {
+                key: u7::from_int_lossy(key),
+                vel: u7::from_int_lossy(0),
+            },
+        };
+        push_event(&mut track, &mut prev_tick, end_tick, kind);
+        counts.note_offs += 1;
+        counts.synthesized_offs += 1;
+    }
+
+    let last_tick = prev_tick;
+    push_event(
+        &mut track,
+        &mut prev_tick,
+        last_tick,
+        TrackEventKind::Meta(MetaMessage::EndOfTrack),
+    );
 
     let smf = Smf {
         header: Header::new(
             Format::SingleTrack,
-            Timing::Metrical(u15::from_int_lossy(TPQN)),
+            Timing::Timecode(SMPTE_FPS, SMPTE_SUBFRAMES),
         ),
         tracks: vec![track],
     };
@@ -192,12 +249,16 @@ pub fn write_smf(path: &Path, events: &[RawMidiEvent]) -> Result<MidiCounts> {
 mod tests {
     use super::*;
 
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lufs-rec-miditest-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("capture.mid")
+    }
+
     #[test]
     fn smf_roundtrip_counts_notes() {
-        let dir = std::env::temp_dir().join(format!("lufs-rec-miditest-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("capture.mid");
-
+        let path = tmp("balanced");
         // note-on then note-off, ~0.5s apart, on channel 1.
         let events = vec![
             RawMidiEvent {
@@ -209,17 +270,61 @@ mod tests {
                 data: vec![0x80, 60, 0],
             },
         ];
-        let counts = write_smf(&path, &events).unwrap();
+        let counts = write_smf(&path, &events, 0, 1_000_000_000).unwrap();
         assert_eq!(counts.events, 2);
         assert_eq!(counts.note_ons, 1);
         assert_eq!(counts.note_offs, 1);
-        assert!(path.exists());
+        assert_eq!(counts.synthesized_offs, 0);
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
 
-        // File parses back as a valid SMF.
+        // Parses back, and the timing division is SMPTE (absolute), not metrical.
+        let bytes = std::fs::read(&path).unwrap();
+        let smf = Smf::parse(&bytes).expect("valid SMF");
+        assert!(matches!(smf.header.timing, Timing::Timecode(..)));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn held_note_is_closed_at_capture_end() {
+        let path = tmp("hanging");
+        // A note-on with no matching note-off (key held when capture stopped).
+        let events = vec![RawMidiEvent {
+            offset_ns: 200_000_000,
+            data: vec![0x90, 64, 100],
+        }];
+        let counts = write_smf(&path, &events, 0, 5_000_000_000).unwrap();
+        assert_eq!(counts.note_ons, 1);
+        assert_eq!(
+            counts.note_offs, 1,
+            "held note must be balanced by a synth off"
+        );
+        assert_eq!(counts.synthesized_offs, 1);
+
         let bytes = std::fs::read(&path).unwrap();
         assert!(Smf::parse(&bytes).is_ok());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn anchor_shifts_events_toward_zero() {
+        // An event at 300ms with a 100ms anchor lands at ~200ms (tick 200).
+        let path = tmp("anchor");
+        let events = vec![
+            RawMidiEvent {
+                offset_ns: 300_000_000,
+                data: vec![0x90, 60, 100],
+            },
+            RawMidiEvent {
+                offset_ns: 800_000_000,
+                data: vec![0x80, 60, 0],
+            },
+        ];
+        let counts = write_smf(&path, &events, 100_000_000, 1_000_000_000).unwrap();
+        assert_eq!(counts.note_ons, 1);
+        assert_eq!(counts.note_offs, 1);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(Smf::parse(&bytes).is_ok());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

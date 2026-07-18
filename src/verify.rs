@@ -228,12 +228,14 @@ pub fn run(take_dir: &Path, manifest: &Manifest) -> Verification {
         ));
     }
 
-    // --- A/V offset: reported, not gated in v0.2 (needs loopback calibration) ---
+    // --- A/V alignment: MIDI is anchored to audio zero + latency-compensated.
+    // The applied shift is reported; the residual is gated by the loopback
+    // fixture at certify-time, not here. ---
     checks.push(Check::info(
         "av_offset_within_tol",
         true,
         Some(format!(
-            "{:.2} ms (informational)",
+            "MIDI shifted {:.2} ms to align with audio (informational)",
             manifest.captured.av_offset_ms
         )),
     ));
