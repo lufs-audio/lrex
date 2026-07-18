@@ -148,6 +148,24 @@ footer{border-top:1px solid var(--line);padding:26px clamp(16px,4vw,40px);displa
   .trk-strip .hd{padding:7px 10px}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ---- display tuning panel (Shift+D) ---- */
+.tuner{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:400;width:min(700px,92vw);background:rgba(12,12,12,.94);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:16px;padding:18px 20px;box-shadow:0 18px 60px rgba(0,0,0,.6);transition:opacity .2s,transform .2s}
+.tuner[aria-hidden="true"]{opacity:0;pointer-events:none;transform:translateX(-50%) translateY(14px)}
+.tuner-hd{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.tuner-hd .rec-dot{color:var(--rust)}
+.tbtn{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:.7rem;line-height:1}
+.tbtn:hover{color:var(--cream);border-color:var(--teal)}
+.knobs{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.knob{flex:1;min-width:60px;text-align:center;user-select:none}
+.dial{width:56px;height:56px;margin:0 auto;border-radius:50%;background:radial-gradient(circle at 50% 36%,#252525,#0c0c0c);border:1px solid var(--line);position:relative;cursor:ns-resize;box-shadow:inset 0 2px 8px rgba(0,0,0,.7)}
+.dial::before{content:"";position:absolute;inset:5px;border-radius:50%;border:1px dashed rgba(251,249,226,.09)}
+.dial .ind{position:absolute;left:50%;top:50%;width:2px;height:20px;background:var(--teal);transform-origin:bottom center;transform:translate(-50%,-100%);border-radius:2px;box-shadow:0 0 6px rgba(120,190,186,.7)}
+.kv{font-family:var(--mono);font-size:.68rem;color:var(--cream);margin-top:9px}
+.kl{font-family:var(--mono);font-size:.5rem;letter-spacing:.1em;color:var(--dim);text-transform:uppercase;margin-top:3px}
+.tuner-ft{display:flex;align-items:center;gap:12px;margin-top:16px;padding-top:14px;border-top:1px solid var(--line2);flex-wrap:wrap}
+.tjson{font-family:var(--mono);font-size:.62rem;color:var(--muted);flex:1;min-width:160px;word-break:break-all}
+.trow{display:flex;gap:8px}
+@media(max-width:600px){.knobs{gap:8px}.dial{width:46px;height:46px}.dial .ind{height:16px}.knob{min-width:50px}}
 </style>
 </head>
 <body data-look="setup">
@@ -286,10 +304,17 @@ footer{border-top:1px solid var(--line);padding:26px clamp(16px,4vw,40px);displa
   </div>
 </section>
 
+<div id="tuner" class="tuner" aria-hidden="true">
+  <div class="tuner-hd"><span class="sec-label" style="color:var(--teal)"><span class="rec-dot">●</span> DISPLAY TUNING</span><span class="sec-label" style="margin-left:auto">SHIFT+D</span><button id="tuner-x" class="tbtn" aria-label="close">✕</button></div>
+  <div class="knobs" id="knobs"></div>
+  <div class="tuner-ft"><code id="tuner-json" class="tjson"></code><div class="trow"><button id="tuner-copy" class="btn sm">copy</button><button id="tuner-reset" class="btn sm">reset</button></div></div>
+  <div class="sec-label" style="margin-top:10px;color:var(--dim)">display-only — scales how signal is shown, never the captured audio. tune against a live take, then copy to bake as defaults.</div>
+</div>
+
 <footer>
   <div style="display:flex;align-items:center;gap:12px">
     <div class="squares"><i style="background:var(--gold)"></i><i style="background:var(--teal)"></i><i style="background:var(--blue)"></i><i style="background:var(--rust)"></i></div>
-    <span class="foot-meta" style="text-align:left">lufs<span style="color:var(--teal)">.</span>recorder — control surface over <span class="mono">serve</span></span>
+    <span class="foot-meta" style="text-align:left">lufs<span style="color:var(--teal)">.</span>recorder — control surface over <span class="mono">serve</span> · <span class="mono">SHIFT+D</span> display tuning</span>
   </div>
   <div class="foot-meta" id="foot-mode">—</div>
 </footer>
@@ -328,6 +353,15 @@ var es=null;                      /* EventSource for /api/record/stream */
 var LIVE={elapsed:0,xruns:0,frames:0,byTrack:{}};   /* real: per-track {pk,rms,wave[]} */
 var REVIEW={id:null,byTrack:{},notes:[],dur:0};
 var t0=0;
+
+/* ============ display tuning (Shift+D) — display-only, never touches captured audio ============ */
+var VIZ_DEF={oscGain:3,specGain:2.2,meterFloor:-60,meterCeil:0,smooth:0.6};
+function loadViz(){try{var s=JSON.parse(localStorage.getItem('lufs-recorder-viz'));if(s)return Object.assign({},VIZ_DEF,s);}catch(e){}return Object.assign({},VIZ_DEF);}
+var VIZ=loadViz();
+function saveViz(){try{localStorage.setItem('lufs-recorder-viz',JSON.stringify(VIZ));}catch(e){}}
+var meterSm=[];
+function clampV(x){return x<-1?-1:x>1?1:x;}
+function meterPct(db){if(db==null||!isFinite(db))return 0;var p=(db-VIZ.meterFloor)/((VIZ.meterCeil-VIZ.meterFloor)||1);return Math.max(0,Math.min(100,p*100));}
 
 /* ============ API ============ */
 function api(path,opts){return fetch(path,opts).then(function(r){if(!r.ok)throw new Error(path+' '+r.status);return r.json();});}
@@ -395,19 +429,19 @@ function makeSpectrogram(cv,specFn){var buf=document.createElement('canvas'),g;
     if(buf.width!==Math.round(r.width)||buf.height!==h){buf.width=Math.max(2,Math.round(r.width));buf.height=h;g=buf.getContext('2d');g.fillStyle='#0c0c0c';g.fillRect(0,0,buf.width,buf.height);}return true;}
   return function(amp,specArr){if(!ensure())return;var w=buf.width,h=buf.height;
     g.drawImage(buf,-2,0);g.fillStyle='#0c0c0c';g.fillRect(w-2,0,2,h);
-    if(amp>0.005){var s=specArr||(specFn?specFn(h,amp):null);if(s)for(var y=0;y<h;y++){g.fillStyle=heat(s[Math.min(s.length-1,y)]);g.fillRect(w-2,h-1-y,2,1);}}
+    if(amp>0.005){var s=specArr||(specFn?specFn(h,amp):null);if(s)for(var y=0;y<h;y++){g.fillStyle=heat(s[Math.min(s.length-1,y)]*VIZ.specGain);g.fillRect(w-2,h-1-y,2,1);}}
     var o=fit(cv);if(o)o.x.drawImage(buf,0,0,w,h,0,0,o.w,o.h);};}
 function grid(x,w,h){x.strokeStyle='rgba(251,249,226,.06)';x.lineWidth=1;for(var gx=0;gx<w;gx+=w/8){x.beginPath();x.moveTo(gx,0);x.lineTo(gx,h);x.stroke();}x.beginPath();x.moveTo(0,h/2);x.lineTo(w,h/2);x.stroke();}
 function flatline(cv){var o=fit(cv);if(!o)return;var x=o.x,w=o.w,h=o.h;x.clearRect(0,0,w,h);grid(x,w,h);
   var p=0.5+0.5*Math.sin(phase*2);x.strokeStyle='rgba(120,190,186,'+(0.14+p*0.12)+')';x.lineWidth=1.4;x.beginPath();x.moveTo(0,h/2);x.lineTo(w,h/2);x.stroke();}
 function drawLine(cv,sampleFn,amp,colA,colB){if(amp<0.02)return flatline(cv);var o=fit(cv);if(!o)return;var x=o.x,w=o.w,h=o.h;x.clearRect(0,0,w,h);grid(x,w,h);
-  var n=Math.max(120,Math.floor(w));function trace(col,off){x.strokeStyle=col;x.lineWidth=1.5;x.beginPath();for(var i=0;i<n;i++){var v=sampleFn(i,n,amp,off);var yy=h/2-v*(h*0.4);i?x.lineTo(i/n*w,yy):x.moveTo(0,yy);}x.stroke();}trace(colA,0);if(colB)trace(colB,1);}
+  var n=Math.max(120,Math.floor(w));function trace(col,off){x.strokeStyle=col;x.lineWidth=1.5;x.beginPath();for(var i=0;i<n;i++){var v=sampleFn(i,n,amp,off);var yy=h/2-clampV(v*VIZ.oscGain)*(h*0.4);i?x.lineTo(i/n*w,yy):x.moveTo(0,yy);}x.stroke();}trace(colA,0);if(colB)trace(colB,1);}
 /* filled peak-envelope trace from a real wave[] (values treated as ±amplitude; mirrored so convention-agnostic) */
 function drawEnvelope(cv,wave,col){var o=fit(cv);if(!o)return;var x=o.x,w=o.w,h=o.h;x.clearRect(0,0,w,h);grid(x,w,h);
   if(!wave||!wave.length)return;var n=wave.length,mid=h/2;
   x.fillStyle=col.replace('rgb','rgba').replace(')',',.28)');x.strokeStyle=col;x.lineWidth=1.3;
-  x.beginPath();for(var i=0;i<n;i++){var a=Math.abs(wave[i]);var y=mid-a*(h*0.44);x.lineTo(i/(n-1)*w,y);}
-  for(var j=n-1;j>=0;j--){var a2=Math.abs(wave[j]);var y2=mid+a2*(h*0.44);x.lineTo(j/(n-1)*w,y2);}
+  x.beginPath();for(var i=0;i<n;i++){var a=Math.min(1,Math.abs(wave[i])*VIZ.oscGain);var y=mid-a*(h*0.44);x.lineTo(i/(n-1)*w,y);}
+  for(var j=n-1;j>=0;j--){var a2=Math.min(1,Math.abs(wave[j])*VIZ.oscGain);var y2=mid+a2*(h*0.44);x.lineTo(j/(n-1)*w,y2);}
   x.closePath();x.fill();x.stroke();}
 
 /* 88-key piano */
@@ -426,7 +460,7 @@ function drawKbd(cv){var o=fit(cv);if(!o)return;var x=o.x,w=o.w,h=o.h;x.clearRec
 function drawDial(cv,amp){var o=fit(cv);if(!o)return;var x=o.x,w=o.w,h=o.h;x.clearRect(0,0,w,h);
   var cx=w/2,cy=h/2,R=Math.min(w,h)/2-8;x.strokeStyle='rgba(251,249,226,.10)';x.lineWidth=10;x.beginPath();x.arc(cx,cy,R,0,6.283);x.stroke();
   var n=180;x.lineWidth=2;x.strokeStyle=STATE==='recording'?'rgba(211,82,51,.9)':'rgba(120,190,186,.85)';x.beginPath();
-  for(var i=0;i<=n;i++){var a=-1.5708+i/n*6.283,s=amp<0.02?0:ringSample(i,n,amp),rr=R-14+s*12,px=cx+Math.cos(a)*rr,py=cy+Math.sin(a)*rr;i?x.lineTo(px,py):x.moveTo(px,py);}x.closePath();x.stroke();
+  for(var i=0;i<=n;i++){var a=-1.5708+i/n*6.283,s=amp<0.02?0:clampV(ringSample(i,n,amp)*VIZ.oscGain),rr=R-14+s*12,px=cx+Math.cos(a)*rr,py=cy+Math.sin(a)*rr;i?x.lineTo(px,py):x.moveTo(px,py);}x.closePath();x.stroke();
   if(STATE==='recording'){var frac=(LIVE.elapsed%60)/60;x.strokeStyle='rgba(211,82,51,.95)';x.lineWidth=10;x.lineCap='round';x.beginPath();x.arc(cx,cy,R,-1.5708,-1.5708+frac*6.283);x.stroke();x.lineCap='butt';}}
 function ringSample(i,n,amp){if(DEMO)return synthSample(1,prof(TRACKS[0]?TRACKS[0].name:'mic'),i,n,amp);
   var w=firstWave();if(!w||!w.length)return 0;return w[Math.floor(i/n*w.length)%w.length]||0;}
@@ -549,6 +583,10 @@ function applyLive(s){
   if(typeof s.elapsed_s==='number')LIVE.elapsed=s.elapsed_s;
   if(typeof s.xruns==='number')LIVE.xruns=s.xruns;if(typeof s.frames==='number')LIVE.frames=s.frames;
   (s.levels||[]).forEach(function(l){LIVE.byTrack[l.name]={pk:l.peak_dbfs,rms:l.rms_dbfs,wave:l.wave||[]};});
+  /* live MIDI (pending backend): light the 88-key roll from note-ons in this frame, or a held-note list. */
+  if(Array.isArray(s.notes)){s.notes.forEach(function(nn){var key=(nn&&nn.key!=null)?nn.key:nn;if(key>=NOTE_LOW&&key<=NOTE_HIGH)noteLit[key]=Math.max(noteLit[key]||0,(nn&&nn.vel)?Math.max(0.25,nn.vel/127):1);});}
+  else if(Array.isArray(s.active)){s.active.forEach(function(key){if(key>=NOTE_LOW&&key<=NOTE_HIGH)noteLit[key]=1;});}
+  if(typeof s.midi_events==='number'){var me=document.getElementById('s-midi');if(me)me.textContent=s.midi_events;}
   if(s.recording===false){/* engine ended */}
 }
 async function stopRec(){
@@ -616,7 +654,8 @@ function loop(now){var dt=(now-last)/1000;last=now;
       if(DEMO&&recording){pkAmp=Math.abs(synthSample(idx+1,prof(t.name),3,32,amp));pkDb=20*Math.log10(pkAmp||1e-6);rmsDb=pkDb-4;}
       else if(!DEMO&&LIVE.byTrack[t.name]){pkDb=LIVE.byTrack[t.name].pk;rmsDb=LIVE.byTrack[t.name].rms;pkAmp=Math.pow(10,(pkDb||-120)/20);}
       var bar=document.querySelector('[data-m="'+idx+'"]'),db=document.querySelector('[data-db="'+idx+'"]');
-      if(bar)bar.style.width=(recording?Math.max(2,Math.min(100,pkAmp*100)):0)+'%';
+      var tgt=recording?meterPct(pkDb):0;meterSm[idx]=(meterSm[idx]||0)+(tgt-(meterSm[idx]||0))*(1-VIZ.smooth);
+      if(bar)bar.style.width=meterSm[idx].toFixed(1)+'%';
       if(db)db.innerHTML='pk '+(recording?fmtDb(pkDb):'—')+'<br>rms '+(recording?fmtDb(rmsDb):'—');});
   } else if(look==='scope'){
     if(recording)document.getElementById('s-time').textContent=tstr;
@@ -656,8 +695,41 @@ var mixSpectro,consoleSpectro;
 function initSpectros(){mixSpectro=makeSpectrogram(document.getElementById('s-spec'),function(bins,amp){var out=new Array(bins).fill(0);TRACKS.forEach(function(t){var s=synthSpectrum(prof(t.name),bins,amp);for(var i=0;i<bins;i++)out[i]=Math.min(1,out[i]+s[i]*0.6);});return out;});
   consoleSpectro=makeSpectrogram(document.getElementById('c-spectro'),function(bins,amp){return synthSpectrum(prof(TRACKS[1]?TRACKS[1].name:'piano'),bins,amp);});}
 
+/* ============ display-tuning knob panel (Shift+D) ============ */
+var TUNER_PARAMS=[
+  {key:'oscGain',label:'osc gain',min:1,max:24,step:0.5,unit:'x'},
+  {key:'specGain',label:'spectro gain',min:0.5,max:8,step:0.1,unit:'x'},
+  {key:'meterFloor',label:'meter floor',min:-90,max:-24,step:1,unit:'dB'},
+  {key:'meterCeil',label:'meter ceil',min:-18,max:6,step:1,unit:'dB'},
+  {key:'smooth',label:'ballistics',min:0,max:0.95,step:0.05,unit:''}
+];
+function fmtVal(p,v){return p.unit==='x'?v.toFixed(1)+'×':(p.unit==='dB'?(v>0?'+':'')+v.toFixed(0)+' dB':v.toFixed(2));}
+function knobDeg(p,v){return -135+((v-p.min)/(p.max-p.min))*270;}
+function buildTuner(){var host=document.getElementById('knobs');if(!host)return;host.innerHTML='';
+  TUNER_PARAMS.forEach(function(p){var el=document.createElement('div');el.className='knob';
+    el.innerHTML='<div class="dial"><div class="ind"></div></div><div class="kv"></div><div class="kl">'+p.label+'</div>';
+    host.appendChild(el);
+    var dial=el.querySelector('.dial'),ind=el.querySelector('.ind'),kv=el.querySelector('.kv');
+    function refresh(){ind.style.transform='translate(-50%,-100%) rotate('+knobDeg(p,VIZ[p.key])+'deg)';kv.textContent=fmtVal(p,VIZ[p.key]);}
+    function set(v){v=Math.round(v/p.step)*p.step;v=Math.max(p.min,Math.min(p.max,v));VIZ[p.key]=+v.toFixed(4);refresh();saveViz();updateTunerJSON();}
+    refresh();
+    var dragging=false,sy=0,sv=0;
+    dial.addEventListener('pointerdown',function(e){dragging=true;sy=e.clientY;sv=VIZ[p.key];try{dial.setPointerCapture(e.pointerId);}catch(_){}});
+    dial.addEventListener('pointermove',function(e){if(!dragging)return;set(sv+(sy-e.clientY)*(p.max-p.min)/160);});
+    dial.addEventListener('pointerup',function(){dragging=false;});
+    dial.addEventListener('wheel',function(e){e.preventDefault();set(VIZ[p.key]+(e.deltaY<0?p.step:-p.step));},{passive:false});
+    dial.addEventListener('dblclick',function(){set(VIZ_DEF[p.key]);});
+  });
+  updateTunerJSON();}
+function updateTunerJSON(){var el=document.getElementById('tuner-json');if(el)el.textContent=JSON.stringify(VIZ);}
+function toggleTuner(f){var t=document.getElementById('tuner');var show=f!==undefined?f:(t.getAttribute('aria-hidden')==='true');t.setAttribute('aria-hidden',show?'false':'true');}
+document.getElementById('tuner-x').addEventListener('click',function(){toggleTuner(false);});
+document.getElementById('tuner-reset').addEventListener('click',function(){VIZ=Object.assign({},VIZ_DEF);saveViz();buildTuner();});
+document.getElementById('tuner-copy').addEventListener('click',function(){var b=document.getElementById('tuner-copy');try{navigator.clipboard.writeText(JSON.stringify(VIZ,null,2));}catch(e){}b.textContent='copied ✓';setTimeout(function(){b.textContent='copy';},1200);});
+addEventListener('keydown',function(e){var tn=(document.activeElement&&document.activeElement.tagName)||'';if((e.key==='D'||e.key==='d')&&e.shiftKey&&!/INPUT|SELECT|TEXTAREA/.test(tn)){e.preventDefault();toggleTuner();}});
+
 /* ============ go ============ */
-initSpectros();applyState('idle');boot();requestAnimationFrame(loop);
+initSpectros();buildTuner();applyState('idle');boot();requestAnimationFrame(loop);
 </script>
 </body>
 </html>
