@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>lufs-recorder — control</title>
+<style>
+  :root{
+    --ground:#111; --panel:#1a1a1a; --line:#2c2c2c; --cream:#fbf9e2;
+    --teal:#78BEBA; --red:#D35233; --gold:#D9A23D; --muted:#8a8a86;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--ground); color:var(--cream);
+    font-family:"Space Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    line-height:1.5; padding:24px; max-width:960px; margin:0 auto;
+  }
+  h1{font-size:1.2rem; letter-spacing:.02em; margin:0 0 2px}
+  .sub{color:var(--muted); font-size:.8rem; margin-bottom:20px}
+  .sub b{color:var(--gold)}
+  section{background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px}
+  h2{font-size:.8rem; text-transform:uppercase; letter-spacing:.12em; color:var(--teal); margin:0 0 12px}
+  button{
+    background:transparent; color:var(--cream); border:1px solid var(--teal);
+    border-radius:5px; padding:7px 12px; font-family:inherit; font-size:.8rem;
+    cursor:pointer; transition:background .12s;
+  }
+  button:hover{background:rgba(120,190,186,.15)}
+  button.primary{background:var(--teal); color:var(--ground); border-color:var(--teal); font-weight:700}
+  button.danger{border-color:var(--red); color:var(--red)}
+  button.danger:hover{background:rgba(211,82,51,.15)}
+  button:disabled{opacity:.4; cursor:not-allowed}
+  input{
+    background:var(--ground); color:var(--cream); border:1px solid var(--line);
+    border-radius:5px; padding:7px 9px; font-family:inherit; font-size:.8rem; width:100%;
+  }
+  label{display:block; font-size:.72rem; color:var(--muted); margin:0 0 4px}
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:12px}
+  .row{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+  pre{background:var(--ground); border:1px solid var(--line); border-radius:6px; padding:12px; overflow:auto; font-size:.72rem; max-height:340px; white-space:pre-wrap; word-break:break-word}
+  .ok{color:var(--teal)} .fail{color:var(--red)} .warn{color:var(--gold)}
+  .status{font-size:.85rem; margin-top:10px}
+  .dot{display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--muted); margin-right:6px; vertical-align:middle}
+  .dot.live{background:var(--red); animation:pulse 1s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .take{border-top:1px solid var(--line); padding:8px 0; font-size:.78rem; display:flex; justify-content:space-between; gap:10px; align-items:center}
+  .take:first-of-type{border-top:none}
+  .muted{color:var(--muted)}
+  a{color:var(--teal)}
+</style>
+</head>
+<body>
+  <h1>lufs-recorder <span class="muted">— control</span></h1>
+  <div class="sub">Throwaway dev UI over the local JSON API. <b>Not the real frontend</b> — it exists to confirm the endpoints and hand Amacher a working contract.</div>
+
+  <section>
+    <h2>Devices &amp; MIDI</h2>
+    <div class="row"><button onclick="loadDevices()">Refresh devices</button></div>
+    <pre id="devices">—</pre>
+  </section>
+
+  <section>
+    <h2>Record</h2>
+    <div class="grid">
+      <div><label>name</label><input id="r-name" value="session" /></div>
+      <div><label>device (blank = config default)</label><input id="r-device" placeholder="Universal Audio…" /></div>
+      <div><label>channels (blank = config layout)</label><input id="r-channels" placeholder="1-2,9-10" /></div>
+      <div><label>midi (blank = config)</label><input id="r-midi" placeholder="Nord,Syntakt / all / off" /></div>
+    </div>
+    <div class="row">
+      <button id="btn-start" class="primary" onclick="startRec()">● Start</button>
+      <button id="btn-stop" class="danger" onclick="stopRec()" disabled>■ Stop</button>
+    </div>
+    <div class="status" id="rec-status"><span class="dot"></span>idle</div>
+    <pre id="rec-result" style="display:none"></pre>
+  </section>
+
+  <section>
+    <h2>Takes</h2>
+    <div class="row"><button onclick="loadTakes()">Refresh takes</button></div>
+    <div id="takes"><span class="muted">—</span></div>
+    <pre id="take-detail" style="display:none"></pre>
+  </section>
+
+  <section>
+    <h2>Self-test &amp; Config</h2>
+    <div class="row">
+      <button onclick="runSelftest()">Run selftest</button>
+      <button onclick="loadConfig()">Show config</button>
+    </div>
+    <pre id="diag">—</pre>
+  </section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || res.status + " " + res.statusText);
+  return data;
+}
+
+async function loadDevices() {
+  $("devices").textContent = "loading…";
+  try {
+    const d = await api("/api/devices");
+    const audio = d.audio_input_devices.map(a =>
+      `${a.is_default ? "★ " : "  "}${a.name}  —  ${a.max_input_channels}ch @ ${a.default_sample_rate}Hz ${a.default_sample_format}`
+    ).join("\n");
+    const mid = d.midi_input_ports.map(p => "  " + p).join("\n");
+    $("devices").textContent = `AUDIO INPUTS\n${audio || "  (none)"}\n\nMIDI PORTS\n${mid || "  (none)"}`;
+  } catch (e) { $("devices").innerHTML = `<span class="fail">${e.message}</span>`; }
+}
+
+async function loadConfig() {
+  $("diag").textContent = "loading…";
+  try { $("diag").textContent = JSON.stringify(await api("/api/config"), null, 2); }
+  catch (e) { $("diag").innerHTML = `<span class="fail">${e.message}</span>`; }
+}
+
+async function runSelftest() {
+  $("diag").textContent = "running…";
+  try {
+    const r = await api("/api/selftest");
+    const lines = r.checks.map(c => {
+      const cls = c.ok ? "ok" : (c.gating ? "fail" : "warn");
+      const mark = c.ok ? "ok  " : (c.gating ? "FAIL" : "warn");
+      return `<span class="${cls}">[${mark}] ${c.name}</span>${c.detail ? "  " + c.detail : ""}`;
+    }).join("\n");
+    const head = r.passed ? `<span class="ok">selftest PASSED</span>` : `<span class="fail">selftest FAILED</span>`;
+    $("diag").innerHTML = head + "\n" + lines;
+  } catch (e) { $("diag").innerHTML = `<span class="fail">${e.message}</span>`; }
+}
+
+async function startRec() {
+  const body = { name: $("r-name").value || "session" };
+  if ($("r-device").value.trim()) body.device = $("r-device").value.trim();
+  if ($("r-channels").value.trim()) body.channels = $("r-channels").value.trim();
+  if ($("r-midi").value.trim()) body.midi = $("r-midi").value.trim();
+  $("rec-result").style.display = "none";
+  try {
+    await api("/api/record/start", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    pollStatus();
+  } catch (e) { $("rec-status").innerHTML = `<span class="fail">${e.message}</span>`; }
+}
+
+async function stopRec() {
+  $("btn-stop").disabled = true;
+  $("rec-status").innerHTML = `<span class="dot"></span>finalizing…`;
+  try {
+    const r = await api("/api/record/stop", { method: "POST" });
+    const t = r.take, v = t.verification.verified;
+    const head = v ? `<span class="ok">VERIFIED</span>` : `<span class="fail">FAILED</span>`;
+    const tracks = t.tracks.map(x => `  ${x.file} — peak ${x.peak_dbfs.toFixed(1)} dBFS`).join("\n");
+    const md = t.midi ? `\n  ${t.midi.file} — ${t.midi.events} events (${t.midi.note_ons} on / ${t.midi.note_offs} off)` : "";
+    const fails = t.verification.checks.filter(c => !c.ok).map(c => `  [${c.gating?"FAIL":"warn"}] ${c.name} ${c.detail||""}`).join("\n");
+    $("rec-result").style.display = "block";
+    $("rec-result").innerHTML = `${head}  ${r.id}\n  ${t.captured.duration_s.toFixed(2)}s @ ${t.captured.rate}Hz — ${t.captured.xruns} xruns\n${tracks}${md}${fails ? "\n" + fails : ""}`;
+    loadTakes();
+  } catch (e) { $("rec-result").style.display = "block"; $("rec-result").innerHTML = `<span class="fail">${e.message}</span>`; }
+  setIdle();
+}
+
+function setIdle() {
+  $("btn-start").disabled = false;
+  $("btn-stop").disabled = true;
+  $("rec-status").innerHTML = `<span class="dot"></span>idle`;
+}
+
+async function pollStatus() {
+  try {
+    const s = await api("/api/record/status");
+    if (s.recording) {
+      $("btn-start").disabled = true;
+      $("btn-stop").disabled = false;
+      $("rec-status").innerHTML = `<span class="dot live"></span>recording <b>${s.name}</b> — ${s.elapsed_s.toFixed(1)}s`;
+      setTimeout(pollStatus, 1000);
+    } else {
+      setIdle();
+    }
+  } catch (e) { setIdle(); }
+}
+
+async function loadTakes() {
+  $("takes").innerHTML = "<span class='muted'>loading…</span>";
+  try {
+    const d = await api("/api/takes");
+    if (!d.takes.length) { $("takes").innerHTML = "<span class='muted'>no takes yet in " + d.out_dir + "</span>"; return; }
+    $("takes").innerHTML = d.takes.map(t => `
+      <div class="take">
+        <span>${t.verified ? '<span class="ok">✓</span>' : '<span class="fail">✗</span>'} ${t.id}
+          <span class="muted">— ${t.duration_s.toFixed(1)}s, ${t.xruns} xruns, ${t.tracks} track(s)${t.midi ? " + midi" : ""}</span></span>
+        <button onclick="verifyTake('${t.id}')">Verify</button>
+      </div>`).join("");
+  } catch (e) { $("takes").innerHTML = `<span class="fail">${e.message}</span>`; }
+}
+
+async function verifyTake(id) {
+  $("take-detail").style.display = "block";
+  $("take-detail").textContent = "verifying…";
+  try {
+    const r = await api("/api/verify", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ id }) });
+    $("take-detail").textContent = JSON.stringify(r, null, 2);
+  } catch (e) { $("take-detail").innerHTML = `<span class="fail">${e.message}</span>`; }
+}
+
+// Initial load.
+loadDevices();
+loadTakes();
+pollStatus();
+</script>
+</body>
+</html>

@@ -13,6 +13,11 @@ fn duration_tolerance(expected_s: f64) -> f64 {
     (expected_s * 0.05).max(0.5)
 }
 
+/// Sane upper bound for the applied MIDI→audio alignment shift. The shift is
+/// `audio_t0 − input_latency` — normally ~50–150 ms (device warm-up + buffer).
+/// Well outside this range means the anchor is broken or audio never started.
+const AV_SHIFT_MAX_MS: f64 = 500.0;
+
 struct WavStats {
     channels: u16,
     sample_rate: u32,
@@ -228,17 +233,29 @@ pub fn run(take_dir: &Path, manifest: &Manifest) -> Verification {
         ));
     }
 
-    // --- A/V alignment: MIDI is anchored to audio zero + latency-compensated.
-    // The applied shift is reported; the residual is gated by the loopback
-    // fixture at certify-time, not here. ---
-    checks.push(Check::info(
-        "av_offset_within_tol",
-        true,
-        Some(format!(
-            "MIDI shifted {:.2} ms to align with audio (informational)",
-            manifest.captured.av_offset_ms
-        )),
-    ));
+    // --- A/V alignment. The precise anchor math is gated tightly by `selftest`
+    // (in-process, sub-ms). Here, on a live take with MIDI armed, we gate that
+    // the applied MIDI→audio shift is *sane* (a broken/absent anchor would sit
+    // outside this bound). The sub-frame residual — MIDI transport jitter + the
+    // instrument's own note latency — is not something we can measure live, so
+    // it is not gated. ---
+    if manifest.midi.is_some() {
+        let shift = manifest.captured.av_offset_ms;
+        let ok = (0.0..=AV_SHIFT_MAX_MS).contains(&shift);
+        checks.push(Check::gating(
+            "av_offset_within_tol",
+            ok,
+            (!ok).then(|| {
+                format!("MIDI→audio shift {shift:.2} ms outside [0, {AV_SHIFT_MAX_MS:.0}] ms")
+            }),
+        ));
+    } else {
+        checks.push(Check::info(
+            "av_offset_within_tol",
+            true,
+            Some("no MIDI armed; A/V alignment not applicable".to_string()),
+        ));
+    }
 
     let verified = checks.iter().all(|c| !c.gating || c.ok);
     Verification { verified, checks }

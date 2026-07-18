@@ -85,7 +85,31 @@ lufs-recorder verify ~/Samples/sampleLibrary/lufs-recorder/2026-07-18_1530_idea 
 # Prove the build itself is correct — no audio hardware needed (audio de-interleave
 # + WAV round-trip, MIDI SMF export, A/V anchor math).
 lufs-recorder selftest --json
+
+# Serve a local control UI + JSON API (browser control surface over the engine).
+lufs-recorder serve --port 8777          # then open http://127.0.0.1:8777/
+lufs-recorder serve --frontend ./frontend   # live-edit the UI without rebuilding
 ```
+
+### HTTP API (for a real frontend)
+
+`serve` exposes a small JSON API on `127.0.0.1`; the bundled page at `/` is a *throwaway*
+control surface that exercises it. The stable endpoint contract:
+
+| Method + path | Purpose |
+|---|---|
+| `GET /api/devices` | audio input devices + MIDI ports |
+| `GET /api/config` | resolved config + `out_dir` |
+| `GET /api/selftest` | run the in-process fixtures |
+| `GET /api/takes` · `GET /api/takes/<id>` | list takes / one take manifest |
+| `POST /api/verify` | `{id}` or `{dir}` → manifest + verification |
+| `POST /api/record/start` | `{device?, tracks?|channels?, midi?, rate?, bit_depth?, name?}` |
+| `GET /api/record/status` | `{recording, name?, elapsed_s?}` |
+| `POST /api/record/stop` | stop → `{stopped, id, take: manifest}` |
+
+The browser is a *control surface*, not the capture engine — multichannel + MIDI capture stays in
+the binary. Recording over HTTP currently drives the `record` subprocess (SIGINT to finalize); the
+API is stable regardless of that detail.
 
 `--channels` groups by token: a range `1-2` is one stereo track, a bare `1` is its own mono track,
 so `1-2,9-10` reproduces the two stereo pairs. `--track NAME=CHANNELS` instead names a track and
@@ -134,9 +158,10 @@ in the shared knowledge base:
 - **v0.1** — honest skeleton: command surface + failing sentinels. *(done)*
 - **v0.2** — single-device audio + MIDI, maxpatch parity, config file, inline verification. *(done)*
 - **v0.2.x** — `~/.config` standard path; MIDI→audio anchor + latency comp; hanging-note closure;
-  arbitrary named tracks (`--track`), multi-port MIDI; in-process `selftest` fixture. *(you are here)*
-- **v0.3** — A/V offset *gating* (calibrated by the selftest / an optional on-device loopback);
-  NDJSON progress polish; FLAC output.
+  arbitrary named tracks (`--track`), multi-port MIDI; in-process `selftest` fixture.
+- **v0.3** — A/V-offset gating (sane-bound on the live take; math gated by `selftest`); `serve`
+  local control UI + JSON API (throwaway frontend + stable endpoints). *(you are here)*
+- **v0.4** — a real frontend (Amacher) over the `serve` API; NDJSON progress polish; FLAC output.
 - **v1.0** — hardening, macOS + Linux static binaries, CI running the contract end-to-end.
 - **Tier 2 (best-effort, post-v1)** — multi-device simultaneous capture via per-OS backends, with
   documented clock-drift risk. Does *not* gate v1.
