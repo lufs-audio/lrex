@@ -55,21 +55,28 @@ pub fn arm(spec: &str, clock: SessionClock) -> std::result::Result<Option<MidiCa
         return Ok(None);
     }
 
-    let probe = MidiInput::new("lufs-recorder-probe").map_err(|e| e.to_string())?;
     let want_all = spec.eq_ignore_ascii_case("all");
     let needle = spec.to_lowercase();
 
-    let mut selected = Vec::new();
-    for port in probe.ports() {
-        let name = probe.port_name(&port).unwrap_or_default();
-        if want_all || name.to_lowercase().contains(&needle) {
-            selected.push((port, name));
-        }
-    }
+    // Enumerate with a short-lived probe input, released by RAII (scope end)
+    // before we open the capture connections. Not an explicit `drop()`: on the
+    // CoreAudio backend `MidiInput` doesn't implement `Drop`, so dropping it is
+    // a no-op that only extends its lifetime (clippy::drop_non_drop).
+    let selected: Vec<(midir::MidiInputPort, String)> = {
+        let probe = MidiInput::new("lufs-recorder-probe").map_err(|e| e.to_string())?;
+        probe
+            .ports()
+            .into_iter()
+            .map(|port| {
+                let name = probe.port_name(&port).unwrap_or_default();
+                (port, name)
+            })
+            .filter(|(_, name)| want_all || name.to_lowercase().contains(&needle))
+            .collect()
+    };
     if selected.is_empty() {
         return Err(format!("MIDI input port matching '{spec}' not found"));
     }
-    drop(probe);
 
     let (tx, rx) = channel::<RawMidiEvent>();
     let mut conns = Vec::new();
