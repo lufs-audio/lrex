@@ -41,6 +41,10 @@ pub enum Command {
         take_dir: PathBuf,
     },
 
+    /// Run in-process self-tests (audio de-interleave + WAV round-trip, MIDI
+    /// SMF export, A/V anchor math). No audio hardware required.
+    Selftest,
+
     /// Write a commented default config (maxpatch parity) so you can edit the
     /// device, MIDI port, and output folder for this machine.
     InitConfig {
@@ -67,6 +71,17 @@ pub struct RecordArgs {
     /// Overrides the config's track layout.
     #[arg(long)]
     pub channels: Option<String>,
+
+    /// Define a named track (repeatable): NAME=CHANNELS, e.g.
+    /// `--track mic=1,2 --track piano=9-10 --track room=3-6`. Everything after
+    /// '=' goes into ONE file (commas and ranges both expand). Overrides the
+    /// config track layout; can't be combined with --channels.
+    #[arg(
+        long = "track",
+        value_name = "NAME=CHANNELS",
+        conflicts_with = "channels"
+    )]
+    pub track: Vec<String>,
 
     /// MIDI input to arm: a port name/substring, "all", or "off".
     #[arg(long)]
@@ -141,6 +156,60 @@ pub fn parse_channel_groups(spec: &str) -> Result<Vec<Vec<u16>>> {
     Ok(groups)
 }
 
+/// Parse a flat channel list for a single track: commas and ranges both expand
+/// into ONE track's channel list. `"1,2"` -> `[1,2]`; `"1-8"` -> `[1..=8]`;
+/// `"1-2,9-10"` -> `[1,2,9,10]`.
+pub fn parse_channel_list(spec: &str) -> Result<Vec<u16>> {
+    let mut out: Vec<u16> = Vec::new();
+    for tok in spec.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        if let Some((a, b)) = tok.split_once('-') {
+            let a: u16 = a
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid channel '{a}' in spec '{spec}'"))?;
+            let b: u16 = b
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid channel '{b}' in spec '{spec}'"))?;
+            if a == 0 || b == 0 {
+                bail!("channels are 1-based; got 0 in spec '{spec}'");
+            }
+            if b < a {
+                bail!("descending range '{tok}' in spec '{spec}'");
+            }
+            out.extend(a..=b);
+        } else {
+            let n: u16 = tok
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid channel '{tok}' in spec '{spec}'"))?;
+            if n == 0 {
+                bail!("channels are 1-based; got 0 in spec '{spec}'");
+            }
+            out.push(n);
+        }
+    }
+    if out.is_empty() {
+        bail!("empty channel spec '{spec}'");
+    }
+    Ok(out)
+}
+
+/// Parse a `--track NAME=CHANNELS` value into `(name, channels)`.
+pub fn parse_track_arg(s: &str) -> Result<(String, Vec<u16>)> {
+    let (name, chans) = s
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("--track expects NAME=CHANNELS, got '{s}'"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("--track name is empty in '{s}'");
+    }
+    Ok((name.to_string(), parse_channel_list(chans)?))
+}
+
 /// A default, human-friendly track name for a CLI-specified channel group.
 pub fn default_track_name(channels: &[u16]) -> String {
     match channels {
@@ -184,5 +253,28 @@ mod tests {
     fn names_are_sensible() {
         assert_eq!(default_track_name(&[1]), "track-01");
         assert_eq!(default_track_name(&[9, 10]), "track-09-10");
+    }
+
+    #[test]
+    fn channel_list_is_flat() {
+        assert_eq!(parse_channel_list("1,2").unwrap(), vec![1, 2]);
+        assert_eq!(parse_channel_list("1-4").unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(parse_channel_list("1-2,9-10").unwrap(), vec![1, 2, 9, 10]);
+        assert!(parse_channel_list("0").is_err());
+        assert!(parse_channel_list("").is_err());
+    }
+
+    #[test]
+    fn track_arg_parses_name_and_channels() {
+        assert_eq!(
+            parse_track_arg("piano=9-10").unwrap(),
+            ("piano".to_string(), vec![9, 10])
+        );
+        assert_eq!(
+            parse_track_arg("drums=1-8").unwrap(),
+            ("drums".to_string(), vec![1, 2, 3, 4, 5, 6, 7, 8])
+        );
+        assert!(parse_track_arg("noequals").is_err());
+        assert!(parse_track_arg("=1,2").is_err());
     }
 }

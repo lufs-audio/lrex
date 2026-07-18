@@ -54,9 +54,16 @@ struct RecordPlan {
 fn resolve_plan(cfg: &Config, args: &cli::RecordArgs) -> crate::error::Result<RecordPlan> {
     let device_query = args.device.clone().unwrap_or_else(|| cfg.device.clone());
 
-    let tracks: Vec<(String, Vec<u16>)> = if let Some(spec) = &args.channels {
-        let groups = cli::parse_channel_groups(spec).map_err(ExitError::Other)?;
-        groups
+    // Track layout precedence: --track (named) > --channels (grouped) > config.
+    let tracks: Vec<(String, Vec<u16>)> = if !args.track.is_empty() {
+        let mut v = Vec::with_capacity(args.track.len());
+        for t in &args.track {
+            v.push(cli::parse_track_arg(t).map_err(ExitError::Other)?);
+        }
+        v
+    } else if let Some(spec) = &args.channels {
+        cli::parse_channel_groups(spec)
+            .map_err(ExitError::Other)?
             .into_iter()
             .map(|g| (cli::default_track_name(&g), g))
             .collect()
@@ -116,7 +123,16 @@ fn max_channel(tracks: &[(String, Vec<u16>)]) -> u16 {
         .unwrap_or(0)
 }
 
-fn wav_spec(channels: u16, sample_rate: u32, bit_depth: &str) -> hound::WavSpec {
+/// The ns to subtract from every MIDI event so its timeline shares a zero with
+/// audio sample 0: `audio_t0 − input_latency`. Audio sample 0 was captured
+/// roughly one input-latency before the first callback fired.
+pub(crate) fn compute_anchor_ns(audio_t0_ns: u128, latency_frames: u64, sample_rate: u32) -> u128 {
+    let sr = (sample_rate as u128).max(1);
+    let latency_ns = (latency_frames as u128) * 1_000_000_000 / sr;
+    audio_t0_ns.saturating_sub(latency_ns)
+}
+
+pub(crate) fn wav_spec(channels: u16, sample_rate: u32, bit_depth: &str) -> hound::WavSpec {
     let (bits, fmt) = match bit_depth {
         "16" => (16, hound::SampleFormat::Int),
         "32f" => (32, hound::SampleFormat::Float),
@@ -150,12 +166,10 @@ pub fn dry_run(
     let midi_ports: Vec<String> = if plan.midi_spec.eq_ignore_ascii_case("off") {
         vec![]
     } else {
-        let want_all = plan.midi_spec.eq_ignore_ascii_case("all");
-        let needle = plan.midi_spec.to_lowercase();
         midi::list_ports()
             .unwrap_or_default()
             .into_iter()
-            .filter(|n| want_all || n.to_lowercase().contains(&needle))
+            .filter(|n| midi::port_matches(n, &plan.midi_spec))
             .collect()
     };
 
@@ -220,7 +234,7 @@ fn dbfs(x: f32) -> f32 {
     }
 }
 
-fn write_sample(
+pub(crate) fn write_sample(
     w: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     bit_depth: &str,
     v: f32,
@@ -603,8 +617,11 @@ pub fn run(
     // compensation). End-of-take is where still-held notes get closed.
     let sr = (chosen.sample_rate as u128).max(1);
     let audio_t0 = audio_t0_ns.load(Ordering::Relaxed) as u128;
-    let latency_ns = (latency_frames.load(Ordering::Relaxed) as u128) * 1_000_000_000 / sr;
-    let midi_anchor_ns = audio_t0.saturating_sub(latency_ns);
+    let midi_anchor_ns = compute_anchor_ns(
+        audio_t0,
+        latency_frames.load(Ordering::Relaxed),
+        chosen.sample_rate,
+    );
     let capture_end_ns = audio_t0 + (stats.frames as u128) * 1_000_000_000 / sr;
 
     // Finish MIDI.
