@@ -1,0 +1,30 @@
+# lufs-recorder config
+# Defaults below reproduce the midi-audio-recorder Max/MSP patch:
+#   mic on channels 1-2, piano on 9-10, 24-bit, MIDI from a Nord Stage 3.
+# Run `lufs-recorder devices --json` to see the exact device/port names on THIS
+# machine, then edit `device` and `midi_port` to match.
+
+# Audio input device name or substring; "default" = system default input.
+device = "default"
+
+# Sample rate: "default" (the device's current rate) or a number, e.g. "48000".
+rate = "default"
+
+# Bit depth for written WAVs: "16" | "24" | "32f". Maxpatch = 24.
+bit_depth = "24"
+
+# Where timestamped take folders are written ("~" is expanded to your home dir).
+out_dir = "~/Samples/sampleLibrary/lufs-recorder"
+
+# MIDI input to arm: a port name/substring, "all", or "off". Maxpatch = Nord Stage 3.
+midi_port = "Nord Stage 3"
+
+# Audio track layout. Each [[tracks]] becomes one WAV file capturing the listed
+# 1-based device input channels (two channels = a stereo file).
+[[tracks]]
+name = "mic"
+channels = [1, 2]
+
+[[tracks]]
+name = "piano"
+channels = [9, 10]

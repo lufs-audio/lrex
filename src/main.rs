@@ -1,145 +1,215 @@
 //! lufs-recorder — universal, agent-first audio + MIDI recorder.
 //!
-//! v0.1 is the *honest skeleton*: the full command surface is defined and parses,
-//! but no command is implemented yet. Every command therefore FAILS with a clear
-//! not-implemented sentinel (exit code 70) rather than pretending to succeed —
-//! see the verifiable-correctness doctrine in the design suite
-//! (danialrami/agent-knowledge : docs/product/lufs-recorder).
-//!
-//! Nothing in this binary reports success it has not earned.
+//! v0.2: single-device multichannel audio + MIDI capture with maxpatch parity
+//! (mic on 1-2, piano on 9-10, 24-bit, Nord Stage 3), a config file, and inline
+//! verification. `works` means proven correct, not merely exited 0 — every take
+//! is checked against the contract before it is declared good (see CONTRACT.md
+//! and the design suite in danialrami/agent-knowledge : docs/product/lufs-recorder).
 
-use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
+mod cli;
+mod clock;
+mod config;
+mod devices;
+mod error;
+mod manifest;
+mod midi;
+mod record;
+mod verify;
+
+use clap::Parser;
+use cli::{Cli, Command};
+use config::Config;
+use error::{code, ExitError};
 use std::process::ExitCode;
-
-/// Exit-code taxonomy (see CONTRACT.md). Stable across versions.
-mod exit {
-    /// Take captured AND verified.
-    pub const OK: u8 = 0;
-    /// Requested audio device or MIDI port unavailable.
-    pub const DEVICE_UNAVAILABLE: u8 = 3;
-    /// Requested format (rate / bit-depth / channels) unsupported by the device.
-    pub const FORMAT_UNSUPPORTED: u8 = 4;
-    /// Capture ran but FAILED the verification contract (xrun, truncation, ...).
-    pub const CONTRACT_VIOLATION: u8 = 5;
-    /// Interrupted before a valid take was produced.
-    pub const INTERRUPTED: u8 = 6;
-    /// Not implemented yet — the honest-failure sentinel.
-    pub const NOT_IMPLEMENTED: u8 = 70;
-}
-
-/// Universal, agent-first audio + MIDI recorder.
-///
-/// Point it at any audio interface, capture an arbitrary subset of that device's
-/// channels alongside MIDI, and get back a take that is *proven* correct.
-#[derive(Parser, Debug)]
-#[command(name = "lufs-recorder", version, about, long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-
-    /// Emit machine-readable JSON (the agent entry point).
-    #[arg(long, global = true)]
-    json: bool,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// List audio devices + channels and MIDI input ports.
-    Devices,
-
-    /// Capture audio (+ optional MIDI) to a verified take.
-    Record(RecordArgs),
-
-    /// Re-run the verification contract against an existing take.
-    Verify {
-        /// Path to an existing take directory.
-        take_dir: PathBuf,
-    },
-}
-
-/// `record` options. Strong defaults preserve the one-button ethos of the
-/// original maxpatch; every knob is optional.
-#[derive(Args, Debug)]
-struct RecordArgs {
-    /// Audio input device (name or id). Default: system default input.
-    #[arg(long)]
-    device: Option<String>,
-
-    /// Channel subset, e.g. "1,2" or "1-2,9-10". Default: all channels.
-    #[arg(long)]
-    channels: Option<String>,
-
-    /// MIDI input to arm: a port name, "all", or "off".
-    #[arg(long, default_value = "off")]
-    midi: String,
-
-    /// Sample rate in Hz. Default: device default.
-    #[arg(long)]
-    rate: Option<u32>,
-
-    /// Sample format: 16, 24, or 32f.
-    #[arg(long, default_value = "24")]
-    bit_depth: String,
-
-    /// Output root directory. Default: ~/Recordings/lufs-recorder.
-    #[arg(long)]
-    out: Option<PathBuf>,
-
-    /// Optional take label; folder becomes <timestamp>_<label>.
-    #[arg(long)]
-    name: Option<String>,
-
-    /// Fixed capture length in seconds. Omit to run until interrupted.
-    #[arg(long)]
-    duration: Option<f64>,
-
-    /// Validate + predict the take without capturing anything.
-    #[arg(long)]
-    dry_run: bool,
-}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let json = cli.json;
 
-    let command_name = match &cli.command {
-        Command::Devices => "devices",
-        Command::Record(_) => "record",
-        Command::Verify { .. } => "verify",
-    };
+    let result = run(&cli);
 
-    // v0.1: no command is implemented. Fail honestly.
-    not_implemented(command_name, cli.json)
+    match result {
+        Ok(()) => ExitCode::from(code::OK),
+        Err(e) => {
+            report_error(&e, json);
+            ExitCode::from(e.code())
+        }
+    }
 }
 
-/// The honest-failure sentinel. Prints a clear message and returns exit code 70.
-/// This lives in the binary (not just a docstring) so a fresh build can never be
-/// mistaken for a working recorder.
-fn not_implemented(command: &str, json: bool) -> ExitCode {
-    let message = format!(
-        "`{command}` is not implemented yet (v0.1 skeleton). See CONTRACT.md and the roadmap."
-    );
+fn run(cli: &Cli) -> error::Result<()> {
+    match &cli.command {
+        Command::Devices => cmd_devices(cli.json),
+        Command::Record(args) => cmd_record(cli, args),
+        Command::Verify { take_dir } => cmd_verify(take_dir, cli.json),
+        Command::InitConfig { out, force } => cmd_init_config(cli, out.clone(), *force),
+    }
+}
+
+fn load_config(cli: &Cli) -> error::Result<Config> {
+    let (cfg, _path) = Config::load(cli.config.as_deref()).map_err(ExitError::Other)?;
+    Ok(cfg)
+}
+
+fn cmd_devices(json: bool) -> error::Result<()> {
+    let audio = devices::list_input_devices().map_err(ExitError::Other)?;
+    let midi_ports = midi::list_ports().unwrap_or_default();
 
     if json {
         let payload = serde_json::json!({
-            "error": "not_implemented",
-            "command": command,
-            "message": message,
-            "exit_code": exit::NOT_IMPLEMENTED,
+            "audio_input_devices": audio,
+            "midi_input_ports": midi_ports,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).map_err(|e| ExitError::Other(e.into()))?
+        );
+    } else {
+        println!("Audio input devices:");
+        if audio.is_empty() {
+            println!("  (none found)");
+        }
+        for d in &audio {
+            let star = if d.is_default { " *default*" } else { "" };
+            println!(
+                "  {}{star}\n     {} in ch, default {} Hz {}, rates {}-{} Hz, formats {}",
+                d.name,
+                d.max_input_channels,
+                d.default_sample_rate,
+                d.default_sample_format,
+                d.sample_rate_range[0],
+                d.sample_rate_range[1],
+                d.sample_formats.join("/"),
+            );
+        }
+        println!("\nMIDI input ports:");
+        if midi_ports.is_empty() {
+            println!("  (none found)");
+        }
+        for p in &midi_ports {
+            println!("  {p}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_record(cli: &Cli, args: &cli::RecordArgs) -> error::Result<()> {
+    let cfg = load_config(cli)?;
+
+    if args.dry_run {
+        return record::dry_run(&cfg, args, cli.json);
+    }
+
+    let outcome = record::run(&cfg, args, cli.json)?;
+    report_take(
+        &outcome.manifest,
+        &outcome.take_dir.display().to_string(),
+        cli.json,
+    )?;
+
+    if outcome.manifest.verification.verified {
+        Ok(())
+    } else if outcome.interrupted {
+        Err(ExitError::Interrupted(format!(
+            "interrupted before a valid take: {}",
+            outcome.take_dir.display()
+        )))
+    } else {
+        Err(ExitError::ContractViolation(format!(
+            "take FAILED verification: {}",
+            outcome.take_dir.display()
+        )))
+    }
+}
+
+fn cmd_verify(take_dir: &std::path::Path, json: bool) -> error::Result<()> {
+    let (manifest, verification) = verify::verify_dir(take_dir).map_err(ExitError::Other)?;
+    report_take(&manifest, &take_dir.display().to_string(), json)?;
+    if verification.verified {
+        Ok(())
+    } else {
+        Err(ExitError::ContractViolation(format!(
+            "take FAILED verification: {}",
+            take_dir.display()
+        )))
+    }
+}
+
+fn cmd_init_config(cli: &Cli, out: Option<std::path::PathBuf>, force: bool) -> error::Result<()> {
+    let path = out
+        .or_else(|| cli.config.clone())
+        .or_else(config::default_config_path)
+        .ok_or_else(|| ExitError::Other(anyhow::anyhow!("could not determine a config path")))?;
+
+    if path.exists() && !force {
+        return Err(ExitError::Other(anyhow::anyhow!(
+            "{} already exists (use --force to overwrite)",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ExitError::Other(e.into()))?;
+    }
+    std::fs::write(&path, config::default_config_toml()).map_err(|e| ExitError::Other(e.into()))?;
+
+    if cli.json {
+        println!("{}", serde_json::json!({"wrote_config": path}));
+    } else {
+        println!(
+            "wrote default (maxpatch-parity) config to {}",
+            path.display()
+        );
+        println!("edit `device`, `midi_port`, and `out_dir` for this machine, then `lufs-recorder devices` to confirm names.");
+    }
+    Ok(())
+}
+
+fn report_take(manifest: &manifest::Manifest, take_dir: &str, json: bool) -> error::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(manifest).map_err(|e| ExitError::Other(e.into()))?
+        );
+        return Ok(());
+    }
+
+    let v = &manifest.verification;
+    println!(
+        "{} — {} ({:.2}s, {} Hz, {} xruns)",
+        if v.verified { "VERIFIED" } else { "FAILED" },
+        take_dir,
+        manifest.captured.duration_s,
+        manifest.captured.rate,
+        manifest.captured.xruns,
+    );
+    for t in &manifest.tracks {
+        println!("  {} — peak {:.1} dBFS", t.file, t.peak_dbfs);
+    }
+    if let Some(m) = &manifest.midi {
+        println!(
+            "  {} — {} events ({} on / {} off)",
+            m.file, m.events, m.note_ons, m.note_offs
+        );
+    }
+    for c in &v.checks {
+        if !c.ok {
+            let tag = if c.gating { "FAIL" } else { "warn" };
+            let detail = c.detail.as_deref().unwrap_or("");
+            println!("  [{tag}] {} {detail}", c.name);
+        }
+    }
+    Ok(())
+}
+
+fn report_error(e: &ExitError, json: bool) {
+    if json {
+        let payload = serde_json::json!({
+            "error": e.kind(),
+            "message": e.to_string(),
+            "exit_code": e.code(),
         });
         println!("{payload}");
     } else {
-        eprintln!("lufs-recorder: {message}");
+        eprintln!("lufs-recorder: {e}");
     }
-
-    // Reference the rest of the taxonomy so it isn't dead code before v0.2 wires it in.
-    debug_assert_ne!(exit::OK, exit::NOT_IMPLEMENTED);
-    let _ = (
-        exit::DEVICE_UNAVAILABLE,
-        exit::FORMAT_UNSUPPORTED,
-        exit::CONTRACT_VIOLATION,
-        exit::INTERRUPTED,
-    );
-
-    ExitCode::from(exit::NOT_IMPLEMENTED)
 }
