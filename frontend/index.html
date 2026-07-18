@@ -79,6 +79,8 @@
     <h2>Takes</h2>
     <div class="row"><button onclick="loadTakes()">Refresh takes</button></div>
     <div id="takes"><span class="muted">—</span></div>
+    <canvas id="take-canvas" width="900" height="220" style="display:none; width:100%; height:220px; background:var(--ground); border:1px solid var(--line); border-radius:6px; margin-top:12px"></canvas>
+    <div id="viz-label" class="muted" style="font-size:.72rem; margin-top:6px"></div>
     <pre id="take-detail" style="display:none"></pre>
   </section>
 
@@ -191,7 +193,10 @@ async function loadTakes() {
       <div class="take">
         <span>${t.verified ? '<span class="ok">✓</span>' : '<span class="fail">✗</span>'} ${t.id}
           <span class="muted">— ${t.duration_s.toFixed(1)}s, ${t.xruns} xruns, ${t.tracks} track(s)${t.midi ? " + midi" : ""}</span></span>
-        <button onclick="verifyTake('${t.id}')">Verify</button>
+        <span class="row">
+          <button onclick="showTakeViz('${t.id}')">View</button>
+          <button onclick="verifyTake('${t.id}')">Verify</button>
+        </span>
       </div>`).join("");
   } catch (e) { $("takes").innerHTML = `<span class="fail">${e.message}</span>`; }
 }
@@ -203,6 +208,50 @@ async function verifyTake(id) {
     const r = await api("/api/verify", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ id }) });
     $("take-detail").textContent = JSON.stringify(r, null, 2);
   } catch (e) { $("take-detail").innerHTML = `<span class="fail">${e.message}</span>`; }
+}
+
+// --- TRUE take visualization: real waveform (/waveform) + real piano-roll
+// (/notes) drawn from the actual take. Reference wiring for the real frontend. ---
+async function showTakeViz(id) {
+  const cv = $("take-canvas"); cv.style.display = "block";
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  $("viz-label").textContent = "loading take data…";
+  try {
+    const manifest = await api("/api/takes/" + id);
+    const track = manifest.tracks[0]?.file;
+    const [wf, nd] = await Promise.all([
+      track ? api(`/api/takes/${id}/waveform?track=${encodeURIComponent(track)}&buckets=900`) : Promise.resolve(null),
+      manifest.midi ? api(`/api/takes/${id}/notes`) : Promise.resolve({ notes: [] }),
+    ]);
+    const dur = manifest.captured.duration_s || 1;
+
+    // Waveform (top ~60%): real peak envelope, mirrored.
+    if (wf && wf.peaks.length) {
+      const h = cv.height * 0.58, mid = h / 2, w = cv.width, step = w / wf.peaks.length;
+      ctx.fillStyle = "#78BEBA";
+      wf.peaks.forEach((p, i) => {
+        const x = i * step, ph = Math.max(1, p * mid);
+        ctx.fillRect(x, mid - ph, Math.max(1, step), ph * 2);
+      });
+      ctx.strokeStyle = "#2c2c2c"; ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+    }
+    // Piano roll (bottom ~40%): real notes.
+    const notes = nd.notes || [];
+    if (notes.length) {
+      const top = cv.height * 0.60, laneH = cv.height * 0.40, w = cv.width;
+      const keys = notes.map(n => n.key);
+      const lo = Math.min(...keys) - 1, hi = Math.max(...keys) + 1, span = Math.max(1, hi - lo);
+      ctx.fillStyle = "#D9A23D";
+      notes.forEach(n => {
+        const x = (n.start_s / dur) * w, nw = Math.max(2, (n.dur_s / dur) * w);
+        const y = top + laneH - ((n.key - lo) / span) * laneH;
+        ctx.fillRect(x, y - 3, nw, 5);
+      });
+    }
+    $("viz-label").textContent =
+      `${id} — waveform: ${track || "n/a"} (${wf ? wf.frames : 0} frames) · notes: ${notes.length}`;
+  } catch (e) { $("viz-label").innerHTML = `<span class="fail">${e.message}</span>`; }
 }
 
 // Initial load.

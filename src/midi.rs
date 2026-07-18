@@ -11,8 +11,9 @@ use midir::{MidiInput, MidiInputConnection};
 use midly::live::LiveEvent;
 use midly::num::{u15, u24, u28, u4, u7};
 use midly::{
-    Format, Header, MetaMessage, MidiMessage, Smf, Timing, Track, TrackEvent, TrackEventKind,
+    Format, Fps, Header, MetaMessage, MidiMessage, Smf, Timing, Track, TrackEvent, TrackEventKind,
 };
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
@@ -267,6 +268,114 @@ pub fn write_smf(
     Ok(counts)
 }
 
+/// A note parsed from a Standard MIDI File, timed in seconds — the shape a
+/// frontend needs to draw a real piano-roll / kslider lane.
+#[derive(Debug, Clone, Serialize)]
+pub struct Note {
+    pub channel: u8,
+    pub key: u8,
+    pub vel: u8,
+    pub start_s: f64,
+    pub dur_s: f64,
+}
+
+/// Parse an SMF into timed notes. Handles both metrical (tempo-relative, honoring
+/// tempo meta) and SMPTE (absolute) division, so it works regardless of how a
+/// take was written.
+pub fn parse_notes(bytes: &[u8]) -> Result<Vec<Note>> {
+    use std::collections::HashMap;
+
+    let smf = Smf::parse(bytes).map_err(|e| anyhow::anyhow!("parsing SMF: {e}"))?;
+
+    // Metrical → seconds-per-tick depends on the (updatable) tempo; SMPTE → fixed.
+    enum Timebase {
+        Metrical(f64), // ticks per quarter note
+        Absolute(f64), // seconds per tick
+    }
+    let timebase = match smf.header.timing {
+        Timing::Metrical(t) => Timebase::Metrical(t.as_int() as f64),
+        Timing::Timecode(fps, sub) => {
+            let f = match fps {
+                Fps::Fps24 => 24.0,
+                Fps::Fps25 => 25.0,
+                Fps::Fps29 => 29.97,
+                Fps::Fps30 => 30.0,
+            };
+            let tps = f * (sub as f64);
+            Timebase::Absolute(if tps > 0.0 { 1.0 / tps } else { 0.0 })
+        }
+    };
+
+    let mut tempo_us = 500_000f64; // 120 BPM default
+    let mut notes: Vec<Note> = Vec::new();
+
+    for track in &smf.tracks {
+        let mut secs = 0f64;
+        let mut open: HashMap<(u8, u8), (f64, u8)> = HashMap::new();
+        for ev in track {
+            let sec_per_tick = match timebase {
+                Timebase::Metrical(tpqn) if tpqn > 0.0 => (tempo_us / 1e6) / tpqn,
+                Timebase::Metrical(_) => 0.0,
+                Timebase::Absolute(spt) => spt,
+            };
+            secs += ev.delta.as_int() as f64 * sec_per_tick;
+            match ev.kind {
+                TrackEventKind::Meta(MetaMessage::Tempo(t)) => tempo_us = t.as_int() as f64,
+                TrackEventKind::Midi { channel, message } => {
+                    let ch = channel.as_int();
+                    match message {
+                        MidiMessage::NoteOn { key, vel } => {
+                            let k = key.as_int();
+                            if vel.as_int() > 0 {
+                                open.insert((ch, k), (secs, vel.as_int()));
+                            } else if let Some((start, v)) = open.remove(&(ch, k)) {
+                                notes.push(Note {
+                                    channel: ch,
+                                    key: k,
+                                    vel: v,
+                                    start_s: start,
+                                    dur_s: (secs - start).max(0.0),
+                                });
+                            }
+                        }
+                        MidiMessage::NoteOff { key, .. } => {
+                            let k = key.as_int();
+                            if let Some((start, v)) = open.remove(&(ch, k)) {
+                                notes.push(Note {
+                                    channel: ch,
+                                    key: k,
+                                    vel: v,
+                                    start_s: start,
+                                    dur_s: (secs - start).max(0.0),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Anything still open (shouldn't happen post hanging-note fix) closes at end.
+        for ((ch, k), (start, v)) in open {
+            notes.push(Note {
+                channel: ch,
+                key: k,
+                vel: v,
+                start_s: start,
+                dur_s: (secs - start).max(0.0),
+            });
+        }
+    }
+
+    notes.sort_by(|a, b| {
+        a.start_s
+            .partial_cmp(&b.start_s)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(notes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +465,35 @@ mod tests {
         assert_eq!(counts.note_offs, 1);
         let bytes = std::fs::read(&path).unwrap();
         assert!(Smf::parse(&bytes).is_ok());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn parse_notes_recovers_timed_notes() {
+        // note-on @0s, note-off @0.5s → one note ~0.5s long, starting ~0s.
+        let path = tmp("notes");
+        let events = vec![
+            RawMidiEvent {
+                offset_ns: 0,
+                data: vec![0x90, 60, 100],
+            },
+            RawMidiEvent {
+                offset_ns: 500_000_000,
+                data: vec![0x80, 60, 0],
+            },
+        ];
+        write_smf(&path, &events, 0, 1_000_000_000).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let notes = parse_notes(&bytes).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].key, 60);
+        assert_eq!(notes[0].vel, 100);
+        assert!(notes[0].start_s.abs() < 0.01, "start {}", notes[0].start_s);
+        assert!(
+            (notes[0].dur_s - 0.5).abs() < 0.02,
+            "dur {}",
+            notes[0].dur_s
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
