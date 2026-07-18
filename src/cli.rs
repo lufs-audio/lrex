@@ -45,6 +45,19 @@ pub enum Command {
     /// SMF export, A/V anchor math). No audio hardware required.
     Selftest,
 
+    /// Serve a local control UI + JSON API on 127.0.0.1 (throwaway frontend +
+    /// stable endpoint contract for a real frontend to build against).
+    Serve {
+        /// Port to bind on 127.0.0.1.
+        #[arg(long, default_value_t = 8777)]
+        port: u16,
+
+        /// Serve the UI from this directory (its index.html) instead of the
+        /// page embedded in the binary — for live frontend iteration.
+        #[arg(long, value_name = "DIR")]
+        frontend: Option<PathBuf>,
+    },
+
     /// Write a commented default config (maxpatch parity) so you can edit the
     /// device, MIDI port, and output folder for this machine.
     InitConfig {

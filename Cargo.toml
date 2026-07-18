@@ -1,6 +1,6 @@
 [package]
 name = "lufs-recorder"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Universal, agent-first CLI for recording any audio device's channels plus MIDI to a verified take."
@@ -34,6 +34,11 @@ sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ringbuf = "0.4"        # lock-free SPSC ring buffer: audio callback -> writer thread
 ctrlc = "3"            # clean stop on Ctrl-C, so an interrupted take still finalizes
+
+# `serve` uses only std::net for HTTP (no web framework) to stay self-contained.
+# libc is only for sending SIGINT to the record subprocess so it finalizes cleanly.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = 3
