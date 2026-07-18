@@ -13,6 +13,9 @@
 //!   GET  /api/selftest         -> { passed, checks }
 //!   GET  /api/takes            -> [ { id, take_id, created, verified, ... } ]
 //!   GET  /api/takes/<id>       -> full take manifest
+//!   GET  /api/takes/<id>/notes -> parsed MIDI notes [{channel,key,vel,start_s,dur_s}]
+//!   GET  /api/takes/<id>/waveform?track=<file>&buckets=N -> peak envelope
+//!   GET  /api/takes/<id>/file/<name> -> raw WAV/MIDI bytes (Web Audio / download)
 //!   POST /api/verify           -> { id } | { dir } -> manifest + verification
 //!   POST /api/record/start     -> { device?, tracks?|channels?, midi?, rate?, bit_depth?, name? }
 //!   GET  /api/record/status    -> { recording, name?, elapsed_s? }
@@ -110,7 +113,9 @@ fn handle(state: Arc<AppState>, stream: TcpStream) -> Result<()> {
     let mut it = request_line.split_whitespace();
     let method = it.next().unwrap_or("").to_string();
     let raw_path = it.next().unwrap_or("/").to_string();
-    let path = raw_path.split('?').next().unwrap_or("/").to_string();
+    let mut split = raw_path.splitn(2, '?');
+    let path = split.next().unwrap_or("/").to_string();
+    let query = split.next().unwrap_or("").to_string();
 
     let mut content_length = 0usize;
     loop {
@@ -135,7 +140,7 @@ fn handle(state: Arc<AppState>, stream: TcpStream) -> Result<()> {
     }
     let body = String::from_utf8_lossy(&body_buf).to_string();
 
-    let (status, ctype, payload) = route(&state, &method, &path, &body);
+    let (status, ctype, payload) = route(&state, &method, &path, &query, &body);
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\n\r\n",
         payload.len()
@@ -166,6 +171,7 @@ fn route(
     state: &AppState,
     method: &str,
     path: &str,
+    query: &str,
     body: &str,
 ) -> (String, &'static str, Vec<u8>) {
     if method == "OPTIONS" {
@@ -182,12 +188,39 @@ fn route(
         ("POST", "/api/record/start") => wrap(api_record_start(state, body)),
         ("POST", "/api/record/stop") => wrap(api_record_stop(state)),
         ("POST", "/api/verify") => wrap(api_verify(state, body)),
+        // Take sub-resources: /api/takes/<id>[/notes | /waveform | /file/<name>]
         ("GET", p) if p.starts_with("/api/takes/") => {
-            let id = p.trim_start_matches("/api/takes/");
-            wrap(api_take(state, id))
+            let rest = p.trim_start_matches("/api/takes/");
+            let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            match segs.as_slice() {
+                [id] => wrap(api_take(state, id)),
+                [id, "notes"] => wrap(api_take_notes(state, id)),
+                [id, "waveform"] => wrap(api_take_waveform(state, id, query)),
+                [id, "file", name] => serve_take_file(state, id, name),
+                _ => err_json("404 Not Found", format!("no route for {method} {path}")),
+            }
         }
         _ => err_json("404 Not Found", format!("no route for {method} {path}")),
     }
+}
+
+/// Reject anything that could escape the take directory.
+fn safe_component(s: &str) -> Result<&str> {
+    if s.is_empty() || s.contains("..") || s.contains('/') || s.contains('\\') {
+        anyhow::bail!("invalid path component");
+    }
+    Ok(s)
+}
+
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|kv| {
+        let mut it = kv.splitn(2, '=');
+        if it.next()? == key {
+            Some(it.next().unwrap_or("").to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Turn a handler Result into an HTTP response.
@@ -269,12 +302,150 @@ fn api_takes(state: &AppState) -> Value {
 }
 
 fn api_take(state: &AppState, id: &str) -> Result<Value> {
-    if id.is_empty() || id.contains("..") || id.contains('/') {
-        anyhow::bail!("invalid take id");
-    }
+    let id = safe_component(id)?;
     let dir = state.out_dir.join(id);
     let m = read_manifest(&dir).ok_or_else(|| anyhow!("no take.json in {}", dir.display()))?;
     Ok(serde_json::to_value(m)?)
+}
+
+/// Parsed MIDI notes for a take — the data behind a real piano-roll / kslider
+/// lane (start/duration in seconds), so the frontend never parses SMF itself.
+fn api_take_notes(state: &AppState, id: &str) -> Result<Value> {
+    let id = safe_component(id)?;
+    let dir = state.out_dir.join(id);
+    let manifest =
+        read_manifest(&dir).ok_or_else(|| anyhow!("no take.json in {}", dir.display()))?;
+    let mid_name = manifest
+        .midi
+        .as_ref()
+        .map(|m| m.file.clone())
+        .unwrap_or_else(|| "capture.mid".to_string());
+    let mid_path = dir.join(&mid_name);
+    if !mid_path.is_file() {
+        return Ok(json!({ "id": id, "notes": [], "count": 0, "note": "no MIDI in this take" }));
+    }
+    let bytes =
+        std::fs::read(&mid_path).with_context(|| format!("reading {}", mid_path.display()))?;
+    let notes = crate::midi::parse_notes(&bytes)?;
+    Ok(json!({
+        "id": id,
+        "count": notes.len(),
+        "duration_s": manifest.captured.duration_s,
+        "notes": notes,
+    }))
+}
+
+/// A downsampled peak envelope for a track's WAV — a fast static waveform
+/// without shipping/decoding the whole file in the browser. `?track=<file>&buckets=N`.
+fn api_take_waveform(state: &AppState, id: &str, query: &str) -> Result<Value> {
+    let id = safe_component(id)?;
+    let dir = state.out_dir.join(id);
+    let manifest =
+        read_manifest(&dir).ok_or_else(|| anyhow!("no take.json in {}", dir.display()))?;
+
+    let track = match query_param(query, "track") {
+        Some(t) if !t.is_empty() => t,
+        _ => manifest
+            .tracks
+            .first()
+            .map(|t| t.file.clone())
+            .ok_or_else(|| anyhow!("take has no tracks"))?,
+    };
+    let track = safe_component(&track)?;
+    let buckets: usize = query_param(query, "buckets")
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(800)
+        .clamp(16, 8000);
+
+    let wav_path = dir.join(track);
+    let mut reader = hound::WavReader::open(&wav_path)
+        .with_context(|| format!("opening {}", wav_path.display()))?;
+    let spec = reader.spec();
+    let ch = spec.channels.max(1) as usize;
+
+    // Per-frame peak (max |sample| across channels), then bucketed.
+    let mut frame_peaks: Vec<f32> = Vec::new();
+    let mut cur: f32 = 0.0;
+    let mut in_frame = 0usize;
+    let denom = 2f64.powi((spec.bits_per_sample as i32 - 1).max(0));
+    let push_sample = |v: f32, cur: &mut f32, in_frame: &mut usize, frame_peaks: &mut Vec<f32>| {
+        *cur = cur.max(v.abs());
+        *in_frame += 1;
+        if *in_frame == ch {
+            frame_peaks.push(*cur);
+            *cur = 0.0;
+            *in_frame = 0;
+        }
+    };
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            for s in reader.samples::<f32>() {
+                push_sample(s?, &mut cur, &mut in_frame, &mut frame_peaks);
+            }
+        }
+        hound::SampleFormat::Int => {
+            for s in reader.samples::<i32>() {
+                push_sample(
+                    (s? as f64 / denom) as f32,
+                    &mut cur,
+                    &mut in_frame,
+                    &mut frame_peaks,
+                );
+            }
+        }
+    }
+
+    let n = frame_peaks.len();
+    let bucket_count = buckets.min(n.max(1));
+    let mut peaks: Vec<f32> = Vec::with_capacity(bucket_count);
+    if n > 0 {
+        for b in 0..bucket_count {
+            let start = b * n / bucket_count;
+            let end = ((b + 1) * n / bucket_count).max(start + 1).min(n);
+            let mut p = 0.0f32;
+            for &v in &frame_peaks[start..end] {
+                p = p.max(v);
+            }
+            peaks.push(p);
+        }
+    }
+
+    Ok(json!({
+        "id": id,
+        "track": track,
+        "channels": spec.channels,
+        "sample_rate": spec.sample_rate,
+        "frames": n,
+        "buckets": peaks.len(),
+        "peaks": peaks,
+    }))
+}
+
+/// Serve a take's raw file (WAV/MIDI/JSON) so the browser can decode audio via
+/// Web Audio (oscilloscope / spectrogram) or fetch the SMF directly.
+fn serve_take_file(state: &AppState, id: &str, name: &str) -> (String, &'static str, Vec<u8>) {
+    let resolved = (|| -> Result<(PathBuf, &'static str)> {
+        let id = safe_component(id)?;
+        let name = safe_component(name)?;
+        let ctype: &'static str = if name.ends_with(".wav") {
+            "audio/wav"
+        } else if name.ends_with(".mid") {
+            "audio/midi"
+        } else if name.ends_with(".json") {
+            "application/json"
+        } else {
+            "application/octet-stream"
+        };
+        Ok((state.out_dir.join(id).join(name), ctype))
+    })();
+
+    match resolved {
+        Ok((path, ctype)) => match std::fs::read(&path) {
+            Ok(bytes) => ("200 OK".to_string(), ctype, bytes),
+            Err(_) => err_json("404 Not Found", format!("no file {}", path.display())),
+        },
+        Err(e) => err_json("400 Bad Request", format!("{e:#}")),
+    }
 }
 
 fn api_verify(state: &AppState, body: &str) -> Result<Value> {

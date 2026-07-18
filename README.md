@@ -102,6 +102,9 @@ control surface that exercises it. The stable endpoint contract:
 | `GET /api/config` | resolved config + `out_dir` |
 | `GET /api/selftest` | run the in-process fixtures |
 | `GET /api/takes` · `GET /api/takes/<id>` | list takes / one take manifest |
+| `GET /api/takes/<id>/notes` | parsed MIDI notes `[{channel,key,vel,start_s,dur_s}]` (piano-roll) |
+| `GET /api/takes/<id>/waveform?track=<file>&buckets=N` | peak envelope for a fast waveform |
+| `GET /api/takes/<id>/file/<name>` | raw WAV/MIDI bytes (Web Audio decode / download) |
 | `POST /api/verify` | `{id}` or `{dir}` → manifest + verification |
 | `POST /api/record/start` | `{device?, tracks?|channels?, midi?, rate?, bit_depth?, name?}` |
 | `GET /api/record/status` | `{recording, name?, elapsed_s?}` |
