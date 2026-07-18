@@ -45,10 +45,14 @@ pub enum Command {
     /// SMF export, A/V anchor math). No audio hardware required.
     Selftest,
 
-    /// Serve a local control UI + JSON API on 127.0.0.1 (throwaway frontend +
-    /// stable endpoint contract for a real frontend to build against).
+    /// Serve the control UI + JSON API over HTTP (the browser front end).
     Serve {
-        /// Port to bind on 127.0.0.1.
+        /// Address to bind. Default 127.0.0.1 (local only); use 0.0.0.0 to
+        /// expose the UI on your LAN.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to bind.
         #[arg(long, default_value_t = 8777)]
         port: u16,
 

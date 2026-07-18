@@ -425,9 +425,9 @@ pub fn run(
     // by the writer thread, drained by the progress loop.
     let track_names: Vec<String> = plan.tracks.iter().map(|(n, _)| n.clone()).collect();
     let live = Arc::new(Mutex::new(vec![LiveAccum::default(); plan.tracks.len()]));
-    // Per-track waveform envelope points (~100/s) for a real live oscilloscope
-    // trace over the stream (decimated peak-per-window; the raw sample rate is far
-    // too high to ship as JSON).
+    // Per-track live oscilloscope trace: **signed** samples in [-1,1] (the track's
+    // first channel), stride-decimated to ~WAVE_POINTS_PER_SEC (the raw rate is
+    // far too high to ship as JSON). A real scope line with zero-crossings.
     let wave = Arc::new(Mutex::new(vec![Vec::<f32>::new(); plan.tracks.len()]));
 
     // Session clock and MIDI arm (before audio, so t0 covers both).
@@ -446,26 +446,33 @@ pub fn run(
     let writer_live = live.clone();
     let writer_wave = wave.clone();
     let ntracks = plan.tracks.len();
-    // One waveform-envelope point per ~10ms window (≈100 pts/s).
-    let wpoint_frames = ((chosen.sample_rate / 100).max(1)) as usize;
+    // Signed scope points per second (per track). Stride-decimated from the true
+    // rate; ~24x denser than the old envelope, so the trace reads high-res.
+    const WAVE_POINTS_PER_SEC: u32 = 2400;
+    let wave_stride = (chosen.sample_rate / WAVE_POINTS_PER_SEC).max(1) as usize;
     let writer_handle = std::thread::spawn(move || -> anyhow::Result<WriterStats> {
         let mut frame_buf: Vec<f32> = Vec::with_capacity(total_selected.max(1));
         // Local live accumulators, flushed into the shared meter periodically so
         // we never lock on the per-sample path.
         let mut recent = vec![LiveAccum::default(); ntracks];
-        let mut wwin_peak = vec![0f32; ntracks]; // current envelope window, per track
-        let mut wwin_count = 0usize;
         let mut local_wave: Vec<Vec<f32>> = vec![Vec::new(); ntracks];
+        let mut wave_frame = 0usize; // frame counter for wave decimation
         let mut last_flush = Instant::now();
+        // Signed sample rounded to 3 decimals (plenty for a scope; halves JSON).
+        let round3 = |v: f32| ((v.clamp(-1.0, 1.0) * 1000.0).round()) / 1000.0;
         loop {
             let mut drained_any = false;
             while let Some(v) = cons.try_pop() {
                 drained_any = true;
                 frame_buf.push(v);
                 if frame_buf.len() == total_selected {
+                    let take_point = wave_frame % wave_stride == 0;
                     let mut off = 0usize;
                     for (ti, tw) in track_writers.iter_mut().enumerate() {
-                        let mut frame_peak = 0f32;
+                        // First channel of the track = the scope line (signed).
+                        if take_point {
+                            local_wave[ti].push(round3(frame_buf[off]));
+                        }
                         for j in 0..tw.channels {
                             let s = frame_buf[off + j];
                             write_sample(&mut tw.writer, &tw.bit_depth, s)?;
@@ -473,26 +480,13 @@ pub fn run(
                             if a > tw.peak {
                                 tw.peak = a;
                             }
-                            if a > frame_peak {
-                                frame_peak = a;
-                            }
                             tw.sumsq += (s as f64) * (s as f64);
                             recent[ti].add_sample(s);
-                        }
-                        if frame_peak > wwin_peak[ti] {
-                            wwin_peak[ti] = frame_peak;
                         }
                         tw.frames += 1;
                         off += tw.channels;
                     }
-                    wwin_count += 1;
-                    if wwin_count >= wpoint_frames {
-                        for (ti, w) in local_wave.iter_mut().enumerate() {
-                            w.push(wwin_peak[ti]);
-                            wwin_peak[ti] = 0.0;
-                        }
-                        wwin_count = 0;
-                    }
+                    wave_frame = wave_frame.wrapping_add(1);
                     writer_frames.fetch_add(1, Ordering::Relaxed);
                     frame_buf.clear();
                 }
@@ -507,9 +501,9 @@ pub fn run(
                 if let Ok(mut sw) = writer_wave.lock() {
                     for (i, w) in local_wave.iter_mut().enumerate() {
                         sw[i].append(w);
-                        // Bound memory if a client isn't draining.
-                        if sw[i].len() > 2000 {
-                            let overflow = sw[i].len() - 2000;
+                        // Bound memory (~2.5s at 2400 pts/s) if a client stalls.
+                        if sw[i].len() > 6000 {
+                            let overflow = sw[i].len() - 6000;
                             sw[i].drain(0..overflow);
                         }
                     }

@@ -88,9 +88,10 @@ lufs-recorder verify ~/Samples/sampleLibrary/lufs-recorder/2026-07-18_1530_idea 
 # + WAV round-trip, MIDI SMF export, A/V anchor math).
 lufs-recorder selftest --json
 
-# Serve a local control UI + JSON API (browser control surface over the engine).
-lufs-recorder serve --port 8777          # then open http://127.0.0.1:8777/
-lufs-recorder serve --frontend ./frontend   # live-edit the UI without rebuilding
+# Serve the control UI + JSON API (browser control surface over the engine).
+lufs-recorder serve --port 8777              # then open http://127.0.0.1:8777/
+lufs-recorder serve --host 0.0.0.0           # expose on your LAN (other devices)
+lufs-recorder serve --frontend ./frontend    # live-edit the UI without rebuilding
 ```
 
 ### HTTP API (for a real frontend)
@@ -113,7 +114,7 @@ The stable endpoint contract:
 | `POST /api/verify` | `{id}` or `{dir}` → manifest + verification |
 | `POST /api/record/start` | `{device?, tracks?|channels?, midi?, rate?, bit_depth?, name?}` |
 | `GET /api/record/status` | `{recording, name?, elapsed_s?, frames?, xruns?, levels?}` — `levels[]` is per-track `{name,peak_dbfs,rms_dbfs,wave[]}`, live while recording (monitoring) |
-| `GET /api/record/stream` | Server-Sent Events: pushes the live snapshot ~12×/s — meters, a decimated `wave[]` peak envelope (live scope), `notes[]` (`{key,vel}` note-ons this frame) + `active[]` (held keys) for a live keyboard, and `midi_events` |
+| `GET /api/record/stream` | Server-Sent Events: pushes the live snapshot ~12×/s — meters, `wave[]` (signed `[-1,1]` scope samples, ~2400/s, per track) for a real live oscilloscope, `notes[]` (`{key,vel}` note-ons this frame) + `active[]` (held keys) for a live keyboard, and `midi_events` |
 | `POST /api/record/stop` | stop → `{stopped, id, take: manifest}` |
 
 The browser is a *control surface*, not the capture engine — multichannel + MIDI capture stay in
