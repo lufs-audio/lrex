@@ -72,6 +72,7 @@
       <button id="btn-stop" class="danger" onclick="stopRec()" disabled>■ Stop</button>
     </div>
     <div class="status" id="rec-status"><span class="dot"></span>idle</div>
+    <canvas id="live-scope" width="900" height="120" style="display:none; width:100%; height:120px; background:var(--ground); border:1px solid var(--line); border-radius:6px; margin-top:10px"></canvas>
     <pre id="rec-result" style="display:none"></pre>
   </section>
 
@@ -144,7 +145,38 @@ async function startRec() {
   try {
     await api("/api/record/start", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
     pollStatus();
+    openScope();
   } catch (e) { $("rec-status").innerHTML = `<span class="fail">${e.message}</span>`; }
+}
+
+// --- Live scope via SSE /api/record/stream: scrolling per-track waveform
+// envelope (real, decimated) + meters. Reference wiring for the real frontend. ---
+let scopeES = null;
+let scopeBuf = [];
+function openScope() {
+  const cv = $("live-scope"); cv.style.display = "block";
+  const ctx = cv.getContext("2d");
+  scopeBuf = [];
+  if (scopeES) scopeES.close();
+  scopeES = new EventSource("/api/record/stream");
+  scopeES.onmessage = (m) => {
+    let s; try { s = JSON.parse(m.data); } catch { return; }
+    if (!s.recording) { scopeES.close(); scopeES = null; return; }
+    // Append the first track's wave points to a scrolling buffer.
+    const wave = (s.levels && s.levels[0] && s.levels[0].wave) || [];
+    scopeBuf.push(...wave);
+    const maxPts = cv.width;
+    if (scopeBuf.length > maxPts) scopeBuf = scopeBuf.slice(scopeBuf.length - maxPts);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.strokeStyle = "#2c2c2c"; ctx.beginPath(); ctx.moveTo(0, cv.height/2); ctx.lineTo(cv.width, cv.height/2); ctx.stroke();
+    ctx.fillStyle = "#78BEBA";
+    const mid = cv.height / 2, step = cv.width / maxPts;
+    scopeBuf.forEach((p, i) => {
+      const h = Math.max(1, p * mid);
+      ctx.fillRect(i * step, mid - h, Math.max(1, step), h * 2);
+    });
+  };
+  scopeES.onerror = () => { if (scopeES) { scopeES.close(); scopeES = null; } };
 }
 
 async function stopRec() {
@@ -168,6 +200,8 @@ function setIdle() {
   $("btn-start").disabled = false;
   $("btn-stop").disabled = true;
   $("rec-status").innerHTML = `<span class="dot"></span>idle`;
+  if (scopeES) { scopeES.close(); scopeES = null; }
+  $("live-scope").style.display = "none";
 }
 
 async function pollStatus() {
