@@ -20,8 +20,9 @@
 //!   POST /api/record/start     -> { device?, tracks?|channels?, midi?, rate?, bit_depth?, name? }
 //!   GET  /api/record/status    -> { recording, name?, elapsed_s?, frames?, xruns?, levels?,
 //!                                     notes?, active?, midi_events? }
-//!        (levels[]: per-track {name, peak_dbfs, rms_dbfs, wave[]}; notes[]: {key,vel} note-ons
-//!         this frame; active[]: held MIDI keys — all live while recording)
+//!        (levels[]: per-track {name, peak_dbfs, rms_dbfs, wave[]}; wave[]: signed [-1,1]
+//!         scope samples (~2400/s); notes[]: {key,vel} note-ons this frame; active[]: held
+//!         MIDI keys — all live while recording)
 //!   GET  /api/record/stream    -> SSE: pushes the same snapshot ~12x/s (live scope + keyboard)
 //!   POST /api/record/stop      -> { stopped, id, take: manifest }
 //!
@@ -70,6 +71,7 @@ struct AppState {
 pub fn serve(
     cfg: Config,
     config_path: Option<PathBuf>,
+    host: String,
     port: u16,
     frontend_dir: Option<PathBuf>,
     json_out: bool,
@@ -86,14 +88,25 @@ pub fn serve(
         live: Arc::new(Mutex::new(None)),
     });
 
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{host}:{port}");
     let listener =
         TcpListener::bind(&addr).map_err(|e| ExitError::Other(anyhow!("binding {addr}: {e}")))?;
-    let url = format!("http://{addr}/");
-    if json_out {
-        println!("{}", json!({ "serving": url }));
+    // For 0.0.0.0, point the user at a reachable URL (localhost) rather than the
+    // wildcard bind address.
+    let shown = if host == "0.0.0.0" {
+        format!("http://localhost:{port}/  (also on your LAN IP:{port})")
     } else {
-        eprintln!("lufs-recorder: control UI + API at {url}  (Ctrl-C to stop)");
+        format!("http://{addr}/")
+    };
+    if json_out {
+        println!("{}", json!({ "serving": shown, "bind": addr }));
+    } else {
+        eprintln!("lufs-recorder: control UI + API at {shown}  (Ctrl-C to stop)");
+        if host == "0.0.0.0" {
+            eprintln!(
+                "lufs-recorder: bound to 0.0.0.0 — reachable by other devices on your network."
+            );
+        }
     }
 
     for stream in listener.incoming() {
@@ -166,9 +179,9 @@ fn handle(state: Arc<AppState>, stream: TcpStream) -> Result<()> {
 }
 
 /// SSE live-monitoring stream. Pushes `{recording, elapsed_s, frames, xruns,
-/// levels[{name,peak_dbfs,rms_dbfs,wave[]}]}` ~12×/s while recording, then a
-/// final `{recording:false}` and closes. `wave[]` is a decimated peak envelope
-/// (~100 pts/s) — a real oscilloscope trace, not a synthesized one.
+/// levels[{name,peak_dbfs,rms_dbfs,wave[]}], notes[], active[], midi_events}`
+/// ~12×/s while recording, then a final `{recording:false}` and closes. `wave[]`
+/// is signed [-1,1] scope samples (~2400/s) — a real oscilloscope trace.
 fn stream_record(state: &AppState, mut writer: TcpStream) -> Result<()> {
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
     writer.write_all(head.as_bytes())?;

@@ -45,9 +45,20 @@ fn run(cli: &Cli) -> error::Result<()> {
         Command::Record(args) => cmd_record(cli, args),
         Command::Verify { take_dir } => cmd_verify(take_dir, cli.json),
         Command::Selftest => cmd_selftest(cli.json),
-        Command::Serve { port, frontend } => {
+        Command::Serve {
+            host,
+            port,
+            frontend,
+        } => {
             let (cfg, cfg_path) = load_config(cli)?;
-            server::serve(cfg, cfg_path, *port, frontend.clone(), cli.json)
+            server::serve(
+                cfg,
+                cfg_path,
+                host.clone(),
+                *port,
+                frontend.clone(),
+                cli.json,
+            )
         }
         Command::InitConfig { out, force } => cmd_init_config(cli, out.clone(), *force),
     }
