@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Manifest schema version. Bump when the shape changes.
-pub const SCHEMA_VERSION: u32 = 1;
+/// v2: added `captured.midi_anchor_ns` + `midi.synthesized_note_offs`, and
+/// `av_offset_ms` now reports the MIDI→audio alignment shift applied.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -59,9 +61,13 @@ pub struct Captured {
     pub xruns: u64,
     pub audio_t0_monotonic_ns: u128,
     pub input_latency_frames: u64,
+    /// Nanoseconds subtracted from every MIDI event so the MIDI timeline shares
+    /// its zero with audio sample 0 (= `audio_t0 − input_latency`).
+    pub midi_anchor_ns: u128,
     pub midi_events: u64,
-    /// Audio-start relative to session t0, in ms. Informational in v0.2
-    /// (calibrated by the loopback fixture at certify-time).
+    /// The MIDI→audio alignment shift applied, in ms (= `midi_anchor_ns` / 1e6).
+    /// The residual after this compensation is MIDI transport jitter + the
+    /// instrument's own note latency; gated honestly by the loopback fixture.
     pub av_offset_ms: f64,
 }
 
@@ -80,6 +86,8 @@ pub struct MidiInfo {
     pub events: u64,
     pub note_ons: u64,
     pub note_offs: u64,
+    /// Note-offs synthesized to close notes still held when capture stopped.
+    pub synthesized_note_offs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

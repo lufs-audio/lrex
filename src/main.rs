@@ -185,8 +185,13 @@ fn report_take(manifest: &manifest::Manifest, take_dir: &str, json: bool) -> err
         println!("  {} — peak {:.1} dBFS", t.file, t.peak_dbfs);
     }
     if let Some(m) = &manifest.midi {
+        let synth = if m.synthesized_note_offs > 0 {
+            format!(", {} held note(s) closed at end", m.synthesized_note_offs)
+        } else {
+            String::new()
+        };
         println!(
-            "  {} — {} events ({} on / {} off)",
+            "  {} — {} events ({} on / {} off{synth})",
             m.file, m.events, m.note_ons, m.note_offs
         );
     }

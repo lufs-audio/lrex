@@ -597,14 +597,29 @@ pub fn run(
         .map_err(|_| ExitError::Other(anyhow!("writer thread panicked")))?
         .map_err(ExitError::Other)?;
 
+    // Align MIDI to audio: the WAV's sample 0 was captured at roughly
+    // (audio_t0 − input_latency), while MIDI is stamped from session t0. Subtract
+    // that from every MIDI event so both files share a zero (input-latency
+    // compensation). End-of-take is where still-held notes get closed.
+    let sr = (chosen.sample_rate as u128).max(1);
+    let audio_t0 = audio_t0_ns.load(Ordering::Relaxed) as u128;
+    let latency_ns = (latency_frames.load(Ordering::Relaxed) as u128) * 1_000_000_000 / sr;
+    let midi_anchor_ns = audio_t0.saturating_sub(latency_ns);
+    let capture_end_ns = audio_t0 + (stats.frames as u128) * 1_000_000_000 / sr;
+
     // Finish MIDI.
     let (midi_info, midi_events) = if let Some(cap) = midi_capture {
         let events = cap.finish();
         if events.is_empty() {
             (None, 0u64)
         } else {
-            let counts = midi::write_smf(&take_dir.join("capture.mid"), &events)
-                .map_err(ExitError::Other)?;
+            let counts = midi::write_smf(
+                &take_dir.join("capture.mid"),
+                &events,
+                midi_anchor_ns,
+                capture_end_ns,
+            )
+            .map_err(ExitError::Other)?;
             (
                 Some(MidiInfo {
                     file: "capture.mid".to_string(),
@@ -612,6 +627,7 @@ pub fn run(
                     events: counts.events,
                     note_ons: counts.note_ons,
                     note_offs: counts.note_offs,
+                    synthesized_note_offs: counts.synthesized_offs,
                 }),
                 counts.events,
             )
@@ -651,10 +667,11 @@ pub fn run(
             0.0
         },
         xruns: xruns.load(Ordering::Relaxed),
-        audio_t0_monotonic_ns: audio_t0_ns.load(Ordering::Relaxed) as u128,
+        audio_t0_monotonic_ns: audio_t0,
         input_latency_frames: latency_frames.load(Ordering::Relaxed),
+        midi_anchor_ns,
         midi_events,
-        av_offset_ms: audio_t0_ns.load(Ordering::Relaxed) as f64 / 1e6,
+        av_offset_ms: midi_anchor_ns as f64 / 1e6,
     };
 
     let tracks_info: Vec<TrackInfo> = plan
