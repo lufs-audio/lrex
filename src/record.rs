@@ -437,6 +437,8 @@ pub fn run(
         .as_ref()
         .map(|c| c.ports.clone())
         .unwrap_or_default();
+    // Shared live-MIDI state (note-ons / held keys) for the progress stream.
+    let midi_live = midi_capture.as_ref().map(|c| c.live.clone());
 
     // Writer thread — drains the ring to disk, tracks peak/RMS.
     let writer_capturing = capturing.clone();
@@ -701,13 +703,32 @@ pub fn run(
                     .collect()
             };
             drop(waves);
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "event": "progress",
                 "elapsed_s": start.elapsed().as_secs_f64(),
                 "frames": frames_written.load(Ordering::Relaxed),
                 "xruns": xruns.load(Ordering::Relaxed),
                 "levels": levels,
             });
+            // Live MIDI: note-ons since last frame (with velocity) + held keys.
+            if let Some(ml) = &midi_live {
+                if let Ok(mut lm) = ml.lock() {
+                    let notes: Vec<serde_json::Value> = lm
+                        .attacks
+                        .drain(..)
+                        .map(|[k, v]| serde_json::json!({ "key": k, "vel": v }))
+                        .collect();
+                    let active: Vec<u8> = lm.active.iter().copied().collect();
+                    let events = lm.events;
+                    if let Some(obj) = payload.as_object_mut() {
+                        if !notes.is_empty() {
+                            obj.insert("notes".to_string(), serde_json::json!(notes));
+                        }
+                        obj.insert("active".to_string(), serde_json::json!(active));
+                        obj.insert("midi_events".to_string(), serde_json::json!(events));
+                    }
+                }
+            }
             println!("{payload}");
         }
     }

@@ -113,7 +113,7 @@ The stable endpoint contract:
 | `POST /api/verify` | `{id}` or `{dir}` → manifest + verification |
 | `POST /api/record/start` | `{device?, tracks?|channels?, midi?, rate?, bit_depth?, name?}` |
 | `GET /api/record/status` | `{recording, name?, elapsed_s?, frames?, xruns?, levels?}` — `levels[]` is per-track `{name,peak_dbfs,rms_dbfs,wave[]}`, live while recording (monitoring) |
-| `GET /api/record/stream` | Server-Sent Events: pushes the live snapshot ~12×/s (meters + a decimated `wave[]` peak envelope for a real live scope) |
+| `GET /api/record/stream` | Server-Sent Events: pushes the live snapshot ~12×/s — meters, a decimated `wave[]` peak envelope (live scope), `notes[]` (`{key,vel}` note-ons this frame) + `active[]` (held keys) for a live keyboard, and `midi_events` |
 | `POST /api/record/stop` | stop → `{stopped, id, take: manifest}` |
 
 The browser is a *control surface*, not the capture engine — multichannel + MIDI capture stay in

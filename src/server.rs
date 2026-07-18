@@ -18,9 +18,11 @@
 //!   GET  /api/takes/<id>/file/<name> -> raw WAV/MIDI bytes (Web Audio / download)
 //!   POST /api/verify           -> { id } | { dir } -> manifest + verification
 //!   POST /api/record/start     -> { device?, tracks?|channels?, midi?, rate?, bit_depth?, name? }
-//!   GET  /api/record/status    -> { recording, name?, elapsed_s?, frames?, xruns?, levels? }
-//!        (levels[]: per-track {name, peak_dbfs, rms_dbfs, wave[]} live while recording)
-//!   GET  /api/record/stream    -> SSE: pushes the same snapshot ~12x/s (live scope)
+//!   GET  /api/record/status    -> { recording, name?, elapsed_s?, frames?, xruns?, levels?,
+//!                                     notes?, active?, midi_events? }
+//!        (levels[]: per-track {name, peak_dbfs, rms_dbfs, wave[]}; notes[]: {key,vel} note-ons
+//!         this frame; active[]: held MIDI keys — all live while recording)
+//!   GET  /api/record/stream    -> SSE: pushes the same snapshot ~12x/s (live scope + keyboard)
 //!   POST /api/record/stop      -> { stopped, id, take: manifest }
 //!
 //! Recording currently shells out to `lufs-recorder record` and stops it with
@@ -190,16 +192,7 @@ fn stream_record(state: &AppState, mut writer: TcpStream) -> Result<()> {
         };
 
         let ev = if recording {
-            let snap = state.live.lock().unwrap().clone();
-            let (frames, xruns, levels) = match &snap {
-                Some(v) => (
-                    v.get("frames").cloned().unwrap_or(json!(0)),
-                    v.get("xruns").cloned().unwrap_or(json!(0)),
-                    v.get("levels").cloned().unwrap_or(json!([])),
-                ),
-                None => (json!(0), json!(0), json!([])),
-            };
-            json!({ "recording": true, "elapsed_s": elapsed, "frames": frames, "xruns": xruns, "levels": levels })
+            live_event(state.live.lock().unwrap().clone(), elapsed, None)
         } else {
             json!({ "recording": false })
         };
@@ -219,6 +212,24 @@ fn stream_record(state: &AppState, mut writer: TcpStream) -> Result<()> {
         std::thread::sleep(Duration::from_millis(80));
     }
     Ok(())
+}
+
+/// Build a "recording" live event by passing the whole progress snapshot
+/// through (frames, xruns, levels, notes, active, midi_events, …) and stamping
+/// `recording`/`elapsed_s`/`name`. Future stream fields flow with no changes here.
+fn live_event(snapshot: Option<Value>, elapsed: f64, name: Option<&str>) -> Value {
+    let mut out = snapshot.unwrap_or_else(|| json!({}));
+    if !out.is_object() {
+        out = json!({});
+    }
+    let obj = out.as_object_mut().expect("object");
+    obj.remove("event");
+    obj.insert("recording".to_string(), json!(true));
+    obj.insert("elapsed_s".to_string(), json!(elapsed));
+    if let Some(n) = name {
+        obj.insert("name".to_string(), json!(n));
+    }
+    out
 }
 
 fn ok_json(v: Value) -> (String, &'static str, Vec<u8>) {
@@ -554,25 +565,11 @@ fn api_status(state: &AppState) -> Value {
             *state.live.lock().unwrap() = None;
             return json!({ "recording": false, "last": name, "note": "record process exited on its own" });
         }
-        // Merge the latest live snapshot (per-track peak/RMS, frames, xruns) so
-        // the UI can drive meters/scopes while recording.
+        // Pass the whole live snapshot through (peak/RMS, frames, xruns, wave,
+        // notes, active, midi_events) so the UI can drive meters/scopes/keyboard.
+        let elapsed = r.started.elapsed().as_secs_f64();
         let snapshot = state.live.lock().unwrap().clone();
-        let (frames, xruns, levels) = match &snapshot {
-            Some(v) => (
-                v.get("frames").cloned().unwrap_or(json!(0)),
-                v.get("xruns").cloned().unwrap_or(json!(0)),
-                v.get("levels").cloned().unwrap_or(json!([])),
-            ),
-            None => (json!(0), json!(0), json!([])),
-        };
-        return json!({
-            "recording": true,
-            "name": r.name,
-            "elapsed_s": r.started.elapsed().as_secs_f64(),
-            "frames": frames,
-            "xruns": xruns,
-            "levels": levels,
-        });
+        return live_event(snapshot, elapsed, Some(&r.name));
     }
     json!({ "recording": false })
 }

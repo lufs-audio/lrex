@@ -17,6 +17,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
 
 /// Metrical SMF timing: 480 ticks/quarter at 120 BPM (500000 µs/qn) => 960
 /// ticks/second. This is a standard, universally-importable MIDI file; a DAW
@@ -39,12 +40,26 @@ pub struct RawMidiEvent {
     pub data: Vec<u8>,
 }
 
+/// Live MIDI monitoring state — updated in the (low-rate) input callback and
+/// drained by the record progress loop so the stream can light a live keyboard.
+#[derive(Default)]
+pub struct LiveMidi {
+    /// Note-ons since the last drain, as `[key, velocity]`.
+    pub attacks: Vec<[u8; 2]>,
+    /// Currently-held keys (MIDI note numbers).
+    pub active: BTreeSet<u8>,
+    /// Running count of MIDI messages received.
+    pub events: u64,
+}
+
 /// An armed MIDI capture. Dropping it (or calling [`MidiCapture::finish`])
 /// disconnects the ports and stops the callbacks.
 pub struct MidiCapture {
     conns: Vec<MidiInputConnection<()>>,
     rx: Receiver<RawMidiEvent>,
     pub ports: Vec<String>,
+    /// Shared live-monitoring state for the stream (see [`LiveMidi`]).
+    pub live: Arc<Mutex<LiveMidi>>,
 }
 
 /// Whether a port `name` matches a MIDI spec: `"all"` matches everything;
@@ -100,12 +115,14 @@ pub fn arm(spec: &str, clock: SessionClock) -> std::result::Result<Option<MidiCa
     }
 
     let (tx, rx) = channel::<RawMidiEvent>();
+    let live = Arc::new(Mutex::new(LiveMidi::default()));
     let mut conns = Vec::new();
     let mut ports = Vec::new();
 
     for (port, name) in selected {
         let input = MidiInput::new("lufs-recorder-in").map_err(|e| e.to_string())?;
         let txc = tx.clone();
+        let livec = live.clone();
         let clk = clock;
         let conn = input
             .connect(
@@ -117,6 +134,20 @@ pub fn arm(spec: &str, clock: SessionClock) -> std::result::Result<Option<MidiCa
                         offset_ns: clk.now_ns(),
                         data: message.to_vec(),
                     });
+                    // Live monitoring: track note-ons/held keys for the stream.
+                    if let Ok(mut lm) = livec.lock() {
+                        lm.events += 1;
+                        if message.len() >= 3 {
+                            let status = message[0] & 0xF0;
+                            let (key, vel) = (message[1], message[2]);
+                            if status == 0x90 && vel > 0 {
+                                lm.attacks.push([key, vel]);
+                                lm.active.insert(key);
+                            } else if status == 0x80 || (status == 0x90 && vel == 0) {
+                                lm.active.remove(&key);
+                            }
+                        }
+                    }
                 },
                 (),
             )
@@ -125,7 +156,12 @@ pub fn arm(spec: &str, clock: SessionClock) -> std::result::Result<Option<MidiCa
         ports.push(name);
     }
 
-    Ok(Some(MidiCapture { conns, rx, ports }))
+    Ok(Some(MidiCapture {
+        conns,
+        rx,
+        ports,
+        live,
+    }))
 }
 
 impl MidiCapture {
