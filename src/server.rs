@@ -19,7 +19,8 @@
 //!   POST /api/verify           -> { id } | { dir } -> manifest + verification
 //!   POST /api/record/start     -> { device?, tracks?|channels?, midi?, rate?, bit_depth?, name? }
 //!   GET  /api/record/status    -> { recording, name?, elapsed_s?, frames?, xruns?, levels? }
-//!        (levels[]: per-track {name, peak_dbfs, rms_dbfs} live while recording)
+//!        (levels[]: per-track {name, peak_dbfs, rms_dbfs, wave[]} live while recording)
+//!   GET  /api/record/stream    -> SSE: pushes the same snapshot ~12x/s (live scope)
 //!   POST /api/record/stop      -> { stopped, id, take: manifest }
 //!
 //! Recording currently shells out to `lufs-recorder record` and stops it with
@@ -40,7 +41,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The throwaway control UI, compiled into the binary. Override at runtime with
 /// `serve --frontend <dir>` for live iteration (Amacher).
@@ -145,6 +146,12 @@ fn handle(state: Arc<AppState>, stream: TcpStream) -> Result<()> {
     }
     let body = String::from_utf8_lossy(&body_buf).to_string();
 
+    // Server-Sent Events stream for live monitoring — hijacks the connection and
+    // pushes snapshots until recording stops or the client disconnects.
+    if method == "GET" && path == "/api/record/stream" {
+        return stream_record(&state, writer);
+    }
+
     let (status, ctype, payload) = route(&state, &method, &path, &query, &body);
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\n\r\n",
@@ -153,6 +160,64 @@ fn handle(state: Arc<AppState>, stream: TcpStream) -> Result<()> {
     writer.write_all(header.as_bytes())?;
     writer.write_all(&payload)?;
     writer.flush()?;
+    Ok(())
+}
+
+/// SSE live-monitoring stream. Pushes `{recording, elapsed_s, frames, xruns,
+/// levels[{name,peak_dbfs,rms_dbfs,wave[]}]}` ~12×/s while recording, then a
+/// final `{recording:false}` and closes. `wave[]` is a decimated peak envelope
+/// (~100 pts/s) — a real oscilloscope trace, not a synthesized one.
+fn stream_record(state: &AppState, mut writer: TcpStream) -> Result<()> {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
+    writer.write_all(head.as_bytes())?;
+    writer.flush()?;
+
+    loop {
+        // Recording state + elapsed, reaping a self-exited child.
+        let (recording, elapsed) = {
+            let mut guard = state.rec.lock().unwrap();
+            match guard.as_mut() {
+                Some(r) => {
+                    if let Ok(Some(_)) = r.child.try_wait() {
+                        *guard = None;
+                        (false, 0.0)
+                    } else {
+                        (true, r.started.elapsed().as_secs_f64())
+                    }
+                }
+                None => (false, 0.0),
+            }
+        };
+
+        let ev = if recording {
+            let snap = state.live.lock().unwrap().clone();
+            let (frames, xruns, levels) = match &snap {
+                Some(v) => (
+                    v.get("frames").cloned().unwrap_or(json!(0)),
+                    v.get("xruns").cloned().unwrap_or(json!(0)),
+                    v.get("levels").cloned().unwrap_or(json!([])),
+                ),
+                None => (json!(0), json!(0), json!([])),
+            };
+            json!({ "recording": true, "elapsed_s": elapsed, "frames": frames, "xruns": xruns, "levels": levels })
+        } else {
+            json!({ "recording": false })
+        };
+
+        if writer
+            .write_all(format!("data: {ev}\n\n").as_bytes())
+            .is_err()
+        {
+            break;
+        }
+        if writer.flush().is_err() {
+            break;
+        }
+        if !recording {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
     Ok(())
 }
 

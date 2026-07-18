@@ -425,6 +425,10 @@ pub fn run(
     // by the writer thread, drained by the progress loop.
     let track_names: Vec<String> = plan.tracks.iter().map(|(n, _)| n.clone()).collect();
     let live = Arc::new(Mutex::new(vec![LiveAccum::default(); plan.tracks.len()]));
+    // Per-track waveform envelope points (~100/s) for a real live oscilloscope
+    // trace over the stream (decimated peak-per-window; the raw sample rate is far
+    // too high to ship as JSON).
+    let wave = Arc::new(Mutex::new(vec![Vec::<f32>::new(); plan.tracks.len()]));
 
     // Session clock and MIDI arm (before audio, so t0 covers both).
     let clock = SessionClock::start();
@@ -438,12 +442,18 @@ pub fn run(
     let writer_capturing = capturing.clone();
     let writer_frames = frames_written.clone();
     let writer_live = live.clone();
+    let writer_wave = wave.clone();
     let ntracks = plan.tracks.len();
+    // One waveform-envelope point per ~10ms window (≈100 pts/s).
+    let wpoint_frames = ((chosen.sample_rate / 100).max(1)) as usize;
     let writer_handle = std::thread::spawn(move || -> anyhow::Result<WriterStats> {
         let mut frame_buf: Vec<f32> = Vec::with_capacity(total_selected.max(1));
         // Local live accumulators, flushed into the shared meter periodically so
         // we never lock on the per-sample path.
         let mut recent = vec![LiveAccum::default(); ntracks];
+        let mut wwin_peak = vec![0f32; ntracks]; // current envelope window, per track
+        let mut wwin_count = 0usize;
+        let mut local_wave: Vec<Vec<f32>> = vec![Vec::new(); ntracks];
         let mut last_flush = Instant::now();
         loop {
             let mut drained_any = false;
@@ -453,6 +463,7 @@ pub fn run(
                 if frame_buf.len() == total_selected {
                     let mut off = 0usize;
                     for (ti, tw) in track_writers.iter_mut().enumerate() {
+                        let mut frame_peak = 0f32;
                         for j in 0..tw.channels {
                             let s = frame_buf[off + j];
                             write_sample(&mut tw.writer, &tw.bit_depth, s)?;
@@ -460,11 +471,25 @@ pub fn run(
                             if a > tw.peak {
                                 tw.peak = a;
                             }
+                            if a > frame_peak {
+                                frame_peak = a;
+                            }
                             tw.sumsq += (s as f64) * (s as f64);
                             recent[ti].add_sample(s);
                         }
+                        if frame_peak > wwin_peak[ti] {
+                            wwin_peak[ti] = frame_peak;
+                        }
                         tw.frames += 1;
                         off += tw.channels;
+                    }
+                    wwin_count += 1;
+                    if wwin_count >= wpoint_frames {
+                        for (ti, w) in local_wave.iter_mut().enumerate() {
+                            w.push(wwin_peak[ti]);
+                            wwin_peak[ti] = 0.0;
+                        }
+                        wwin_count = 0;
                     }
                     writer_frames.fetch_add(1, Ordering::Relaxed);
                     frame_buf.clear();
@@ -477,6 +502,16 @@ pub fn run(
                     }
                 }
                 recent.iter_mut().for_each(|r| *r = LiveAccum::default());
+                if let Ok(mut sw) = writer_wave.lock() {
+                    for (i, w) in local_wave.iter_mut().enumerate() {
+                        sw[i].append(w);
+                        // Bound memory if a client isn't draining.
+                        if sw[i].len() > 2000 {
+                            let overflow = sw[i].len() - 2000;
+                            sw[i].drain(0..overflow);
+                        }
+                    }
+                }
                 last_flush = Instant::now();
             }
             if !writer_capturing.load(Ordering::Relaxed) && cons.is_empty() {
@@ -640,7 +675,8 @@ pub fn run(
         std::thread::sleep(Duration::from_millis(50));
         if json && last_progress.elapsed() >= Duration::from_millis(200) {
             last_progress = Instant::now();
-            // Drain + reset the shared meter into per-track level readings.
+            // Drain + reset the shared meter + waveform into per-track readings.
+            let mut waves = wave.lock().unwrap();
             let levels: Vec<serde_json::Value> = {
                 let mut shared = live.lock().unwrap();
                 shared
@@ -652,16 +688,19 @@ pub fn run(
                         } else {
                             0.0
                         };
+                        let wave_pts: Vec<f32> = std::mem::take(&mut waves[i]);
                         let level = serde_json::json!({
                             "name": track_names.get(i).cloned().unwrap_or_default(),
                             "peak_dbfs": dbfs(a.peak).max(-120.0),
                             "rms_dbfs": dbfs(rms).max(-120.0),
+                            "wave": wave_pts,
                         });
                         *a = LiveAccum::default();
                         level
                     })
                     .collect()
             };
+            drop(waves);
             let payload = serde_json::json!({
                 "event": "progress",
                 "elapsed_s": start.elapsed().as_secs_f64(),
