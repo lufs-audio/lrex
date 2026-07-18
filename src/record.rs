@@ -23,10 +23,38 @@ use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 type AudioProd = <HeapRb<f32> as Split>::Prod;
+
+/// A short-window per-track level accumulator for live monitoring. Updated in
+/// the writer thread (off the real-time callback path) and drained by the
+/// progress loop to emit peak/RMS meters while recording.
+#[derive(Clone, Copy, Default)]
+struct LiveAccum {
+    peak: f32,
+    sumsq: f64,
+    count: u64,
+}
+
+impl LiveAccum {
+    fn add_sample(&mut self, v: f32) {
+        let a = v.abs();
+        if a > self.peak {
+            self.peak = a;
+        }
+        self.sumsq += (v as f64) * (v as f64);
+        self.count += 1;
+    }
+    fn merge(&mut self, o: &LiveAccum) {
+        if o.peak > self.peak {
+            self.peak = o.peak;
+        }
+        self.sumsq += o.sumsq;
+        self.count += o.count;
+    }
+}
 
 /// Seconds of audio the ring buffer can hold before the writer must catch up.
 const RING_SECONDS: usize = 8;
@@ -393,6 +421,11 @@ pub fn run(
     let capturing = Arc::new(AtomicBool::new(true));
     let running = Arc::new(AtomicBool::new(true));
 
+    // Live per-track meters (peak/RMS) for monitoring while recording. Written
+    // by the writer thread, drained by the progress loop.
+    let track_names: Vec<String> = plan.tracks.iter().map(|(n, _)| n.clone()).collect();
+    let live = Arc::new(Mutex::new(vec![LiveAccum::default(); plan.tracks.len()]));
+
     // Session clock and MIDI arm (before audio, so t0 covers both).
     let clock = SessionClock::start();
     let midi_capture = midi::arm(&plan.midi_spec, clock).map_err(ExitError::DeviceUnavailable)?;
@@ -404,8 +437,14 @@ pub fn run(
     // Writer thread — drains the ring to disk, tracks peak/RMS.
     let writer_capturing = capturing.clone();
     let writer_frames = frames_written.clone();
+    let writer_live = live.clone();
+    let ntracks = plan.tracks.len();
     let writer_handle = std::thread::spawn(move || -> anyhow::Result<WriterStats> {
         let mut frame_buf: Vec<f32> = Vec::with_capacity(total_selected.max(1));
+        // Local live accumulators, flushed into the shared meter periodically so
+        // we never lock on the per-sample path.
+        let mut recent = vec![LiveAccum::default(); ntracks];
+        let mut last_flush = Instant::now();
         loop {
             let mut drained_any = false;
             while let Some(v) = cons.try_pop() {
@@ -413,7 +452,7 @@ pub fn run(
                 frame_buf.push(v);
                 if frame_buf.len() == total_selected {
                     let mut off = 0usize;
-                    for tw in track_writers.iter_mut() {
+                    for (ti, tw) in track_writers.iter_mut().enumerate() {
                         for j in 0..tw.channels {
                             let s = frame_buf[off + j];
                             write_sample(&mut tw.writer, &tw.bit_depth, s)?;
@@ -422,6 +461,7 @@ pub fn run(
                                 tw.peak = a;
                             }
                             tw.sumsq += (s as f64) * (s as f64);
+                            recent[ti].add_sample(s);
                         }
                         tw.frames += 1;
                         off += tw.channels;
@@ -429,6 +469,15 @@ pub fn run(
                     writer_frames.fetch_add(1, Ordering::Relaxed);
                     frame_buf.clear();
                 }
+            }
+            if last_flush.elapsed() >= Duration::from_millis(40) {
+                if let Ok(mut shared) = writer_live.lock() {
+                    for (i, r) in recent.iter().enumerate() {
+                        shared[i].merge(r);
+                    }
+                }
+                recent.iter_mut().for_each(|r| *r = LiveAccum::default());
+                last_flush = Instant::now();
             }
             if !writer_capturing.load(Ordering::Relaxed) && cons.is_empty() {
                 break;
@@ -588,14 +637,37 @@ pub fn run(
                 break;
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
-        if json && last_progress.elapsed() >= Duration::from_millis(500) {
+        std::thread::sleep(Duration::from_millis(50));
+        if json && last_progress.elapsed() >= Duration::from_millis(200) {
             last_progress = Instant::now();
+            // Drain + reset the shared meter into per-track level readings.
+            let levels: Vec<serde_json::Value> = {
+                let mut shared = live.lock().unwrap();
+                shared
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let rms = if a.count > 0 {
+                            (a.sumsq / a.count as f64).sqrt() as f32
+                        } else {
+                            0.0
+                        };
+                        let level = serde_json::json!({
+                            "name": track_names.get(i).cloned().unwrap_or_default(),
+                            "peak_dbfs": dbfs(a.peak).max(-120.0),
+                            "rms_dbfs": dbfs(rms).max(-120.0),
+                        });
+                        *a = LiveAccum::default();
+                        level
+                    })
+                    .collect()
+            };
             let payload = serde_json::json!({
                 "event": "progress",
                 "elapsed_s": start.elapsed().as_secs_f64(),
                 "frames": frames_written.load(Ordering::Relaxed),
                 "xruns": xruns.load(Ordering::Relaxed),
+                "levels": levels,
             });
             println!("{payload}");
         }

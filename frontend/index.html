@@ -176,8 +176,14 @@ async function pollStatus() {
     if (s.recording) {
       $("btn-start").disabled = true;
       $("btn-stop").disabled = false;
-      $("rec-status").innerHTML = `<span class="dot live"></span>recording <b>${s.name}</b> — ${s.elapsed_s.toFixed(1)}s`;
-      setTimeout(pollStatus, 1000);
+      // Live per-track peak/RMS meters (real, from the record NDJSON).
+      const meters = (s.levels || []).map(l =>
+        `${l.name} <span class="ok">pk ${l.peak_dbfs.toFixed(1)}</span> / rms ${l.rms_dbfs.toFixed(1)} dBFS`
+      ).join("  ·  ");
+      $("rec-status").innerHTML =
+        `<span class="dot live"></span>recording <b>${s.name}</b> — ${s.elapsed_s.toFixed(1)}s · ${s.xruns || 0} xruns`
+        + (meters ? `<br><span class="muted">${meters}</span>` : "");
+      setTimeout(pollStatus, 200); // fast poll for live meters
     } else {
       setIdle();
     }
