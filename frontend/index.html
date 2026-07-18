@@ -446,6 +446,12 @@ function drawEnvelope(cv,wave,col){var o=fit(cv);if(!o)return;var x=o.x,w=o.w,h=
   x.beginPath();for(var i=0;i<n;i++){var a=Math.min(1,Math.abs(wave[i])*VIZ.oscGain);var y=mid-a*(h*0.44);x.lineTo(i/(n-1)*w,y);}
   for(var j=n-1;j>=0;j--){var a2=Math.min(1,Math.abs(wave[j])*VIZ.oscGain);var y2=mid+a2*(h*0.44);x.lineTo(j/(n-1)*w,y2);}
   x.closePath();x.fill();x.stroke();}
+/* bipolar high-res oscilloscope from signed samples (ws) — matches the demo's full-bandwidth line */
+function drawWaveLine(cv,samples,col){if(!samples||samples.length<2)return flatline(cv);
+  var o=fit(cv);if(!o)return;var x=o.x,w=o.w,h=o.h;x.clearRect(0,0,w,h);grid(x,w,h);
+  var n=samples.length;x.strokeStyle=col;x.lineWidth=1.3;x.beginPath();
+  for(var i=0;i<n;i++){var v=clampV(samples[i]*VIZ.oscGain);var y=h/2-v*(h*0.42);i?x.lineTo(i/(n-1)*w,y):x.moveTo(0,y);}
+  x.stroke();}
 
 /* 88-key piano */
 var NOTE_LOW=21,NOTE_HIGH=108,noteLit={};
@@ -585,10 +591,14 @@ async function startRec(){
 function applyLive(s){
   if(typeof s.elapsed_s==='number')LIVE.elapsed=s.elapsed_s;
   if(typeof s.xruns==='number')LIVE.xruns=s.xruns;if(typeof s.frames==='number')LIVE.frames=s.frames;
-  (s.levels||[]).forEach(function(l){var pt=LIVE.byTrack[l.name]||{};pt.pk=l.peak_dbfs;pt.rms=l.rms_dbfs;pt.wave=l.wave||[];pt.hist=(pt.hist||[]).concat(pt.wave);if(pt.hist.length>6000)pt.hist=pt.hist.slice(pt.hist.length-6000);LIVE.byTrack[l.name]=pt;});
+  (s.levels||[]).forEach(function(l){var pt=LIVE.byTrack[l.name]||{};pt.pk=l.peak_dbfs;pt.rms=l.rms_dbfs;
+    /* v0.4.3: wave[] is now SIGNED scope samples in [-1,1] (~2400/s per track) — a real oscilloscope trace */
+    pt.wave=l.wave||[];pt.hist=(pt.hist||[]).concat(pt.wave);if(pt.hist.length>9000)pt.hist=pt.hist.slice(pt.hist.length-9000);
+    LIVE.byTrack[l.name]=pt;});
   /* live MIDI (pending backend): light the 88-key roll from note-ons in this frame, or a held-note list. */
-  if(Array.isArray(s.notes)){s.notes.forEach(function(nn){var key=(nn&&nn.key!=null)?nn.key:nn;if(key>=NOTE_LOW&&key<=NOTE_HIGH)noteLit[key]=Math.max(noteLit[key]||0,(nn&&nn.vel)?Math.max(0.25,nn.vel/127):1);});}
-  else if(Array.isArray(s.active)){s.active.forEach(function(key){if(key>=NOTE_LOW&&key<=NOTE_HIGH)noteLit[key]=1;});}
+  /* Ciani emits BOTH: notes[] = attacks this frame (velocity-bright), active[] = held keys (stay lit). Apply both. */
+  if(Array.isArray(s.notes)){s.notes.forEach(function(nn){var key=(nn&&nn.key!=null)?nn.key:nn;if(key>=NOTE_LOW&&key<=NOTE_HIGH)noteLit[key]=Math.max(noteLit[key]||0,(nn&&nn.vel)?Math.max(0.3,nn.vel/127):1);});}
+  if(Array.isArray(s.active)){s.active.forEach(function(key){if(key>=NOTE_LOW&&key<=NOTE_HIGH)noteLit[key]=Math.max(noteLit[key]||0,0.85);});}
   if(typeof s.midi_events==='number'){var me=document.getElementById('s-midi');if(me)me.textContent=s.midi_events;}
   if(s.recording===false){/* engine ended */}
 }
@@ -669,14 +679,16 @@ function loop(now){var dt=(now-last)/1000;last=now;
     var mix=document.querySelector('#s-vmode button.on').dataset.m==='mix';
     if(mix){
       if(DEMO)drawLine(document.getElementById('s-osc'),function(i,n,a){var s=0;TRACKS.forEach(function(t){s+=synthSample(TRACKS.indexOf(t)+1,prof(t.name),i,n,a);});return Math.max(-1,Math.min(1,s*0.5));},amp,'rgba(120,190,186,.95)','rgba(231,178,37,.5)');
-      else drawEnvelope(document.getElementById('s-osc'),mixSeg(),'rgb(120,190,186)');
+      else if(STATE==='review')drawEnvelope(document.getElementById('s-osc'),mixSeg(),'rgb(120,190,186)');
+      else drawWaveLine(document.getElementById('s-osc'),mixSeg(),'rgb(120,190,186)');
       if(DEMO)mixSpectro(amp);else mixSpectro(recording?0.5:0,recording?waveToSpec(mixWave(),(innerWidth<=600?96:140)):null);
       document.getElementById('s-mixpeak').textContent=amp<0.02&&!recording?'—':fmtDbAmp(Math.max(0.001,amp*0.9));
     } else {
       TRACKS.forEach(function(t,idx){
         var oc=document.getElementById('s-osc-'+idx);
         if(DEMO)drawLine(oc,function(i,n,a){return synthSample(idx+1,prof(t.name),i,n,a);},amp,trackColor(idx));
-        else drawEnvelope(oc,oscSeg(t.name),hexToRgb(trackColor(idx)));
+        else if(STATE==='review')drawEnvelope(oc,oscSeg(t.name),hexToRgb(trackColor(idx)));
+        else drawWaveLine(oc,oscSeg(t.name),hexToRgb(trackColor(idx)));
         if(!trackSpectros[idx]){var sc=document.getElementById('s-spec-'+idx);if(sc)trackSpectros[idx]=makeSpectrogram(sc,(function(P){return function(bins,a){return synthSpectrum(P,bins,a);};})(prof(t.name)));}
         if(trackSpectros[idx]){if(DEMO)trackSpectros[idx](amp);else{var wv=(STATE==='review'?(REVIEW.byTrack[t.name]||{}).wave:(LIVE.byTrack[t.name]||{}).wave);trackSpectros[idx](wv&&wv.length?0.5:0,wv&&wv.length?waveToSpec(wv,(innerWidth<=600?52:88)):null);}}
         var pl=document.querySelector('[data-tpk="'+idx+'"]');if(pl){var pk=DEMO?(recording?Math.abs(synthSample(idx+1,prof(t.name),5,32,amp)):0):(LIVE.byTrack[t.name]?Math.pow(10,(LIVE.byTrack[t.name].pk||-120)/20):0);pl.textContent=(pk?fmtDbAmp(pk)+' dBFS':'—');}
@@ -693,9 +705,9 @@ function mixWave(){var out=null;for(var k in LIVE.byTrack){var w=(STATE==='revie
   if(STATE==='review'){out=null;for(var k2 in REVIEW.byTrack){var w2=REVIEW.byTrack[k2].wave;if(!w2)continue;if(!out)out=w2.slice();else for(var j=0;j<out.length&&j<w2.length;j++)out[j]=Math.max(-1,Math.min(1,out[j]+w2[j]));}}
   return out;}
 function hexToRgb(h){var n=parseInt(h.slice(1),16);return'rgb('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+')';}
-/* time knob: live oscilloscope shows the last (512 * timeZoom) points of the rolling wave history */
+/* live = windowed signed wave history (last 700*timeZoom samples); review = the take's /waveform peaks */
 function oscSeg(name){if(STATE==='review'){return (REVIEW.byTrack[name]||{}).wave||null;}
-  var hh=(LIVE.byTrack[name]||{}).hist;if(!hh||!hh.length)return null;var win=Math.round(512*(VIZ.timeZoom||1));return hh.slice(Math.max(0,hh.length-win));}
+  var hh=(LIVE.byTrack[name]||{}).hist;if(!hh||!hh.length)return null;var win=Math.round(700*(VIZ.timeZoom||1));return hh.slice(Math.max(0,hh.length-win));}
 function mixSeg(){var out=null;TRACKS.forEach(function(t){var s=oscSeg(t.name);if(!s)return;if(!out)out=s.slice();else{var m=Math.min(out.length,s.length),i;for(i=0;i<m;i++)out[out.length-1-i]=Math.max(-1,Math.min(1,out[out.length-1-i]+s[s.length-1-i]));}});return out;}
 
 var mixSpectro,consoleSpectro;
