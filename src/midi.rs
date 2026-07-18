@@ -9,24 +9,25 @@ use crate::clock::SessionClock;
 use anyhow::{Context, Result};
 use midir::{MidiInput, MidiInputConnection};
 use midly::live::LiveEvent;
-use midly::num::{u28, u4, u7};
+use midly::num::{u15, u24, u28, u4, u7};
 use midly::{
-    Format, Fps, Header, MetaMessage, MidiMessage, Smf, Timing, Track, TrackEvent, TrackEventKind,
+    Format, Header, MetaMessage, MidiMessage, Smf, Timing, Track, TrackEvent, TrackEventKind,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
 
-/// SMPTE **absolute** timing: 25 fps × 40 subframes = 1000 ticks/second
-/// (1 ms/tick). A recorder captures wall-clock time, not metrical music — SMPTE
-/// division means the events carry absolute time, so no DAW project tempo can
-/// stretch a captured take (metrical SMF gets conformed to the project tempo,
-/// which desynced audio vs. MIDI). See design suite `02-research-and-landscape`.
-const SMPTE_FPS: Fps = Fps::Fps25;
-const SMPTE_SUBFRAMES: u8 = 40;
-const TICKS_PER_SECOND: f64 = 1000.0;
+/// Metrical SMF timing: 480 ticks/quarter at 120 BPM (500000 µs/qn) => 960
+/// ticks/second. This is a standard, universally-importable MIDI file; a DAW
+/// conforms it to its own project tempo — that tempo-relative rescaling is the
+/// expected metrical-MIDI behavior (you align the take like any recorded
+/// region). We tried SMPTE absolute timing to lock wall-clock time, but not all
+/// DAWs import it, so we keep metrical for compatibility.
+const TPQN: u16 = 480;
+const TICKS_PER_SECOND: f64 = TPQN as f64 * 2.0; // 120 BPM
+const DEFAULT_TEMPO_US_PER_QN: u32 = 500_000; // 120 BPM
 
-/// Convert nanoseconds (relative to the MIDI anchor) to SMPTE ms-ticks.
+/// Convert nanoseconds (relative to the MIDI anchor) to metrical ticks.
 fn tick_of(rel_ns: u128) -> u64 {
     ((rel_ns as f64) / 1e9 * TICKS_PER_SECOND).round() as u64
 }
@@ -176,6 +177,16 @@ pub fn write_smf(
     // Notes currently sounding, so we can close any still held at capture end.
     let mut held: BTreeSet<(u8, u8)> = BTreeSet::new();
 
+    // Tempo meta at t=0 (120 BPM). Metrical timing is tempo-relative by design.
+    push_event(
+        &mut track,
+        &mut prev_tick,
+        0,
+        TrackEventKind::Meta(MetaMessage::Tempo(u24::from_int_lossy(
+            DEFAULT_TEMPO_US_PER_QN,
+        ))),
+    );
+
     for ev in events {
         let parsed = match LiveEvent::parse(&ev.data) {
             Ok(p) => p,
@@ -235,7 +246,7 @@ pub fn write_smf(
     let smf = Smf {
         header: Header::new(
             Format::SingleTrack,
-            Timing::Timecode(SMPTE_FPS, SMPTE_SUBFRAMES),
+            Timing::Metrical(u15::from_int_lossy(TPQN)),
         ),
         tracks: vec![track],
     };
@@ -280,7 +291,7 @@ mod tests {
         // Parses back, and the timing division is SMPTE (absolute), not metrical.
         let bytes = std::fs::read(&path).unwrap();
         let smf = Smf::parse(&bytes).expect("valid SMF");
-        assert!(matches!(smf.header.timing, Timing::Timecode(..)));
+        assert!(matches!(smf.header.timing, Timing::Metrical(..)));
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
