@@ -9,9 +9,9 @@ lufs-recorder generalizes the Max/MSP patch [`midi-audio-recorder`](https://gith
 into a portable command-line tool. It is built in **Rust** and is our first production Rust
 project — a deliberate flight test for reliability-critical audio tooling in a systems language.
 
-**Status: `v0.1` — the honest skeleton.** The full command surface is defined and parses, but no
-command is implemented yet. Every command deliberately **fails** with a not-implemented sentinel
-(exit code `70`) rather than pretending to work. Nothing here reports success it hasn't earned.
+**Status: `v0.2` — single-device capture with MIDI, at parity with the maxpatch.** `record`,
+`verify`, `devices`, and `init-config` are implemented. A take is captured *and verified against
+the contract* before it is declared good; a take that dropped frames fails by design.
 
 ## Why it exists
 
@@ -22,33 +22,93 @@ patch while making the device, channels, and MIDI source fully selectable — an
 dropped samples is worse than one that failed, because it lies to whoever (or whatever agent)
 trusted the take.
 
-## Install / build
+## Maxpatch parity (the v0.2 defaults)
+
+The built-in defaults reproduce the original patch's rig, so `record` with no flags behaves like
+hitting the big toggle in Max:
+
+| | maxpatch | lufs-recorder default |
+|---|---|---|
+| Audio | ch 1–2 (mic) + ch 9–10 (piano), 24-bit | two stereo tracks `mic` (1–2) + `piano` (9–10), 24-bit |
+| MIDI | Nord Stage 3 | `midi_port = "Nord Stage 3"` |
+| Output | `~/Samples/sampleLibrary/midi-audio-recorder_max/` | `~/Samples/sampleLibrary/lufs-recorder/<timestamp>_<label>/` |
+
+Everything is overridable — per machine via the config file, per take via flags.
+
+## Build (macOS / klaxon)
+
+A one-shot provisioner is in the repo root. It ensures the C toolchain (Xcode CLT), installs Rust
+if needed, and builds `--release`:
 
 ```sh
-# Requires a recent stable Rust toolchain (see rust-toolchain.toml).
+bash provision-and-build.sh            # provision + build
+bash provision-and-build.sh --run-devices   # ...and then list your devices/ports
+```
+
+Or by hand, with a recent stable Rust toolchain (see `rust-toolchain.toml`):
+
+```sh
 cargo build --release
 ./target/release/lufs-recorder --help
 ```
 
-## Usage (target surface)
+> **macOS mic permission:** the first `record` triggers a microphone permission prompt for your
+> terminal (System Settings ▸ Privacy & Security ▸ Microphone). Approve it once.
+
+## Usage
 
 ```sh
-# List audio devices/channels and MIDI ports (machine-readable).
+# See your devices/channels + MIDI ports (find the exact names).
 lufs-recorder devices --json
 
-# Capture channels 1-2 and 9-10 at 48k/24-bit, arm the Nord, run until Ctrl-C.
-lufs-recorder record --device "Scarlett 18i20" --channels 1-2,9-10 \
-  --rate 48000 --bit-depth 24 --midi "Nord Stage 3"
+# Write an editable config (device, midi_port, out_dir) — maxpatch parity.
+lufs-recorder init-config          # -> ~/.config/lufs-recorder/config.toml
 
-# Pre-flight a take without recording.
-lufs-recorder record --device "Scarlett 18i20" --channels 1,2 --dry-run --json
+# Pre-flight a take without recording (resolves device/format, predicts output).
+lufs-recorder record --dry-run --json
+
+# Record the parity rig (mic 1-2 + piano 9-10 + Nord Stage 3); Ctrl-C to stop.
+lufs-recorder record --name idea
+
+# Override per take: any device, any channels, fixed length, MIDI off.
+lufs-recorder record --device "Scarlett 18i20" --channels 1-2,9-10 \
+  --bit-depth 24 --duration 30 --midi off
 
 # Re-verify an existing take against the contract.
-lufs-recorder verify ./2026-07-07_1530_idea --json
+lufs-recorder verify ~/Samples/sampleLibrary/lufs-recorder/2026-07-18_1530_idea --json
 ```
 
-Every command supports `--json`. Exit codes are meaningful (see [CONTRACT.md](CONTRACT.md)) so a
-supervising agent can branch on the result.
+`--channels` groups by token: a range `1-2` is one stereo track, a bare `1` is its own mono track,
+so `1-2,9-10` reproduces the two stereo pairs. `--json` is available on every command; exit codes
+are meaningful (see [CONTRACT.md](CONTRACT.md)) so a supervising agent can branch on the result.
+
+## Configuration
+
+Resolution order: `--config <FILE>` → `$LUFS_RECORDER_CONFIG` →
+`~/.config/lufs-recorder/config.toml` → built-in maxpatch defaults. See
+[`lufs-recorder.example.toml`](lufs-recorder.example.toml) for the full annotated file. CLI flags
+override the config; the config overrides the defaults.
+
+## The take
+
+```
+<timestamp>_<label>/
+  mic.wav               # one WAV per track (a 2-channel track is a stereo file)
+  piano.wav
+  capture.mid           # present iff MIDI was armed and events occurred
+  take.json             # the manifest + verification result
+```
+
+`verified: true` in `take.json` (and exit `0`) is the *only* signal that a take is correct.
+
+## Verification (what "good" means)
+
+Every take is measured against what was requested and checked before it's declared good
+(see [CONTRACT.md](CONTRACT.md)): files exist and decode, channel count / sample rate / bit depth
+match, duration is sane, **`xruns == 0`** (the heart of it), MIDI note-ons balance note-offs, and
+the audio isn't digital silence. Dropped frames are detected from the callback capture timestamps
+and from ring-buffer overruns. A/V offset is *reported* in v0.2 and will become a gating check once
+the loopback fixture calibrates it.
 
 ## Design & rationale
 
@@ -60,12 +120,11 @@ in the shared knowledge base:
 
 ## Roadmap
 
-- **v0.1** — honest skeleton: command surface + failing sentinels. *(you are here)*
-- **v0.2** — single-device audio MVP: enumerate, select device/channels, capture to WAV,
-  deterministic contract checks (channel count, rate, `xruns == 0`, decodes).
-- **v0.3** — MIDI + shared monotonic clock: SMF export, A/V offset check. Full maxpatch parity.
-- **v0.4** — `take.json` manifest, `--dry-run`, NDJSON progress; loopback fixture at certify-time.
-- **v1.0** — hardening, macOS + Linux static binaries, CI running the contract.
+- **v0.1** — honest skeleton: command surface + failing sentinels. *(done)*
+- **v0.2** — single-device audio + MIDI, maxpatch parity, config file, inline verification.
+  *(you are here)*
+- **v0.3** — A/V offset gating via the loopback fixture; NDJSON progress polish; FLAC output.
+- **v1.0** — hardening, macOS + Linux static binaries, CI running the contract end-to-end.
 - **Tier 2 (best-effort, post-v1)** — multi-device simultaneous capture via per-OS backends, with
   documented clock-drift risk. Does *not* gate v1.
 
