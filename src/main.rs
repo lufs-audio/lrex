@@ -46,9 +46,8 @@ fn run(cli: &Cli) -> error::Result<()> {
     }
 }
 
-fn load_config(cli: &Cli) -> error::Result<Config> {
-    let (cfg, _path) = Config::load(cli.config.as_deref()).map_err(ExitError::Other)?;
-    Ok(cfg)
+fn load_config(cli: &Cli) -> error::Result<(Config, Option<std::path::PathBuf>)> {
+    Config::load(cli.config.as_deref()).map_err(ExitError::Other)
 }
 
 fn cmd_devices(json: bool) -> error::Result<()> {
@@ -94,10 +93,10 @@ fn cmd_devices(json: bool) -> error::Result<()> {
 }
 
 fn cmd_record(cli: &Cli, args: &cli::RecordArgs) -> error::Result<()> {
-    let cfg = load_config(cli)?;
+    let (cfg, cfg_path) = load_config(cli)?;
 
     if args.dry_run {
-        return record::dry_run(&cfg, args, cli.json);
+        return record::dry_run(&cfg, args, cli.json, cfg_path.as_deref());
     }
 
     let outcome = record::run(&cfg, args, cli.json)?;
