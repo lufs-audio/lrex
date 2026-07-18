@@ -11,6 +11,7 @@ mod clock;
 mod config;
 mod devices;
 mod error;
+mod fixture;
 mod manifest;
 mod midi;
 mod record;
@@ -42,7 +43,48 @@ fn run(cli: &Cli) -> error::Result<()> {
         Command::Devices => cmd_devices(cli.json),
         Command::Record(args) => cmd_record(cli, args),
         Command::Verify { take_dir } => cmd_verify(take_dir, cli.json),
+        Command::Selftest => cmd_selftest(cli.json),
         Command::InitConfig { out, force } => cmd_init_config(cli, out.clone(), *force),
+    }
+}
+
+fn cmd_selftest(json: bool) -> error::Result<()> {
+    let report = fixture::run_all().map_err(ExitError::Other)?;
+    if json {
+        let payload = serde_json::json!({
+            "selftest": true,
+            "passed": report.passed(),
+            "checks": report.checks,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).map_err(|e| ExitError::Other(e.into()))?
+        );
+    } else {
+        println!(
+            "{}",
+            if report.passed() {
+                "selftest PASSED"
+            } else {
+                "selftest FAILED"
+            }
+        );
+        for c in &report.checks {
+            let mark = if c.ok {
+                "ok"
+            } else if c.gating {
+                "FAIL"
+            } else {
+                "warn"
+            };
+            let detail = c.detail.as_deref().unwrap_or("");
+            println!("  [{mark}] {} {detail}", c.name);
+        }
+    }
+    if report.passed() {
+        Ok(())
+    } else {
+        Err(ExitError::ContractViolation("selftest failed".to_string()))
     }
 }
 

@@ -46,6 +46,20 @@ pub struct MidiCapture {
     pub ports: Vec<String>,
 }
 
+/// Whether a port `name` matches a MIDI spec: `"all"` matches everything;
+/// otherwise the spec is a comma-separated list of case-insensitive substrings,
+/// any of which matching counts (e.g. `"Nord,Syntakt"`).
+pub fn port_matches(name: &str, spec: &str) -> bool {
+    if spec.eq_ignore_ascii_case("all") {
+        return true;
+    }
+    let lname = name.to_lowercase();
+    spec.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .any(|needle| lname.contains(&needle))
+}
+
 /// List available MIDI input port names.
 pub fn list_ports() -> Result<Vec<String>> {
     let input = MidiInput::new("lufs-recorder-list").context("opening MIDI input")?;
@@ -64,9 +78,6 @@ pub fn arm(spec: &str, clock: SessionClock) -> std::result::Result<Option<MidiCa
         return Ok(None);
     }
 
-    let want_all = spec.eq_ignore_ascii_case("all");
-    let needle = spec.to_lowercase();
-
     // Enumerate with a short-lived probe input, released by RAII (scope end)
     // before we open the capture connections. Not an explicit `drop()`: on the
     // CoreAudio backend `MidiInput` doesn't implement `Drop`, so dropping it is
@@ -80,7 +91,7 @@ pub fn arm(spec: &str, clock: SessionClock) -> std::result::Result<Option<MidiCa
                 let name = probe.port_name(&port).unwrap_or_default();
                 (port, name)
             })
-            .filter(|(_, name)| want_all || name.to_lowercase().contains(&needle))
+            .filter(|(_, name)| port_matches(name, spec))
             .collect()
     };
     if selected.is_empty() {
@@ -288,7 +299,7 @@ mod tests {
         assert_eq!(counts.synthesized_offs, 0);
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
 
-        // Parses back, and the timing division is SMPTE (absolute), not metrical.
+        // Parses back, and the timing division is metrical (universally importable).
         let bytes = std::fs::read(&path).unwrap();
         let smf = Smf::parse(&bytes).expect("valid SMF");
         assert!(matches!(smf.header.timing, Timing::Metrical(..)));
@@ -315,6 +326,15 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert!(Smf::parse(&bytes).is_ok());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn port_matching() {
+        assert!(port_matches("Nord Stage 3 MIDI Output", "Nord Stage 3"));
+        assert!(port_matches("Elektron Syntakt", "nord,syntakt"));
+        assert!(port_matches("anything", "all"));
+        assert!(!port_matches("IAC Driver Bus 1", "nord,syntakt"));
+        assert!(!port_matches("IAC Driver Bus 1", ""));
     }
 
     #[test]

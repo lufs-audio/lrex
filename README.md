@@ -74,13 +74,24 @@ lufs-recorder record --name idea
 lufs-recorder record --device "Scarlett 18i20" --channels 1-2,9-10 \
   --bit-depth 24 --duration 30 --midi off
 
+# Arbitrary NAMED tracks from the CLI (repeatable). Everything after '=' goes
+# into ONE file; capture several MIDI ports at once with a comma list or "all".
+lufs-recorder record --track mic=1,2 --track piano=9-10 --track room=3-6 \
+  --midi "Nord,Syntakt"
+
 # Re-verify an existing take against the contract.
 lufs-recorder verify ~/Samples/sampleLibrary/lufs-recorder/2026-07-18_1530_idea --json
+
+# Prove the build itself is correct — no audio hardware needed (audio de-interleave
+# + WAV round-trip, MIDI SMF export, A/V anchor math).
+lufs-recorder selftest --json
 ```
 
 `--channels` groups by token: a range `1-2` is one stereo track, a bare `1` is its own mono track,
-so `1-2,9-10` reproduces the two stereo pairs. `--json` is available on every command; exit codes
-are meaningful (see [CONTRACT.md](CONTRACT.md)) so a supervising agent can branch on the result.
+so `1-2,9-10` reproduces the two stereo pairs. `--track NAME=CHANNELS` instead names a track and
+puts *all* its channels (commas and ranges) in one file. `--midi` takes a port name, a comma-list
+of substrings (`"Nord,Syntakt"`), `all`, or `off`. `--json` is available on every command; exit
+codes are meaningful (see [CONTRACT.md](CONTRACT.md)) so a supervising agent can branch on the result.
 
 ## Configuration
 
@@ -121,9 +132,11 @@ in the shared knowledge base:
 ## Roadmap
 
 - **v0.1** — honest skeleton: command surface + failing sentinels. *(done)*
-- **v0.2** — single-device audio + MIDI, maxpatch parity, config file, inline verification.
-  *(you are here)*
-- **v0.3** — A/V offset gating via the loopback fixture; NDJSON progress polish; FLAC output.
+- **v0.2** — single-device audio + MIDI, maxpatch parity, config file, inline verification. *(done)*
+- **v0.2.x** — `~/.config` standard path; MIDI→audio anchor + latency comp; hanging-note closure;
+  arbitrary named tracks (`--track`), multi-port MIDI; in-process `selftest` fixture. *(you are here)*
+- **v0.3** — A/V offset *gating* (calibrated by the selftest / an optional on-device loopback);
+  NDJSON progress polish; FLAC output.
 - **v1.0** — hardening, macOS + Linux static binaries, CI running the contract end-to-end.
 - **Tier 2 (best-effort, post-v1)** — multi-device simultaneous capture via per-OS backends, with
   documented clock-drift risk. Does *not* gate v1.
