@@ -1,28 +1,47 @@
 name: CI
+
 on:
-  push: { branches: [main] }
-  pull_request: { branches: [main] }
+  push:
+    branches: [main]
+    tags: ['v*']          # a version tag also runs the macOS build
+  pull_request:
+    branches: [main]
+  workflow_dispatch:       # ...and you can trigger the macOS build by hand
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+
 jobs:
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, lufs]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { components: rustfmt }
       - run: cargo fmt --all --check
-  clippy-and-build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix: { os: [ubuntu-latest, macos-latest] }
+
+  linux:
+    runs-on: [self-hosted, lufs]
     steps:
       - uses: actions/checkout@v4
-      - name: Install ALSA + JACK dev headers (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev pkg-config
+      - name: Install ALSA/JACK dev headers + build tools
+        run: apt-get update && apt-get install -y build-essential pkg-config libasound2-dev libjack-jackd2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo build --verbose
+      - run: cargo test --verbose
+
+  macos:
+    # No self-hosted Mac in the fleet, so this runs on GitHub-hosted macOS, which
+    # bills at 10x. Gated to manual runs and version tags so it NEVER fires on a
+    # normal push/PR — that 10x-per-push burn was the whole reason we're here.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
