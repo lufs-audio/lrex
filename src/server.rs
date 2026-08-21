@@ -108,11 +108,10 @@ pub fn serve(
     if json_out {
         println!("{}", json!({ "serving": shown, "bind": addr }));
     } else {
-        eprintln!("lufs-recorder: control UI + API at {shown}  (Ctrl-C to stop)");
+        let prog = crate::invoked_name();
+        eprintln!("{prog}: control UI + API at {shown}  (Ctrl-C to stop)");
         if host == "0.0.0.0" {
-            eprintln!(
-                "lufs-recorder: bound to 0.0.0.0 — reachable by other devices on your network."
-            );
+            eprintln!("{prog}: bound to 0.0.0.0 — reachable by other devices on your network.");
         }
     }
 

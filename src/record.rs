@@ -480,7 +480,7 @@ where
     };
 
     let err_cb = move |e: cpal::StreamError| {
-        eprintln!("lufs-recorder: stream error: {e}");
+        eprintln!("{}: stream error: {e}", crate::invoked_name());
         err_xruns.fetch_add(1, Ordering::Relaxed);
     };
 
@@ -855,15 +855,16 @@ pub fn run(
     }
 
     if !json {
+        let prog = crate::invoked_name();
         let names: Vec<&str> = device_runs.iter().map(|d| d.dev_name.as_str()).collect();
         match plan.duration {
             Some(d) => eprintln!(
-                "lufs-recorder: recording {d:.1}s from {} to {} …",
+                "{prog}: recording {d:.1}s from {} to {} …",
                 names.join(" + "),
                 take_dir.display()
             ),
             None => eprintln!(
-                "lufs-recorder: recording from {} to {} … (Ctrl-C to stop)",
+                "{prog}: recording from {} to {} … (Ctrl-C to stop)",
                 names.join(" + "),
                 take_dir.display()
             ),
