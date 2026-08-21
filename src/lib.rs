@@ -1,10 +1,12 @@
-//! lufs-recorder — universal, agent-first audio + MIDI recorder.
+//! lufs-recorder / lrex — universal, agent-first audio + MIDI recorder.
 //!
-//! v0.2: single-device multichannel audio + MIDI capture with maxpatch parity
-//! (mic on 1-2, piano on 9-10, 24-bit, Nord Stage 3), a config file, and inline
-//! verification. `works` means proven correct, not merely exited 0 — every take
-//! is checked against the contract before it is declared good (see CONTRACT.md
-//! and the design suite in danialrami/agent-knowledge : docs/product/lufs-recorder).
+//! One implementation, two invocation names (`lufs-recorder` for discoverability
+//! and repo identity, `lrex` as the short, bplate-compliant alias for daily
+//! typing — see `src/bin/*.rs` and `lufs-audio/bplate` `docs/units/07-lufs-primitive-cli-naming.md`,
+//! which explicitly recommends an alias over a breaking rename for a daily-driver
+//! tool like this one). `works` means proven correct, not merely exited 0 —
+//! every take is checked against the contract before it is declared good (see
+//! CONTRACT.md and the design suite in `lufs-audio/kb` : docs/product/lufs-recorder).
 
 mod cli;
 mod clock;
@@ -18,14 +20,45 @@ mod record;
 mod server;
 mod verify;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use cli::{Cli, Command};
 use config::Config;
 use error::{code, ExitError};
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
+/// The name this binary was actually invoked as (argv[0]'s basename) — so
+/// `--help`/usage output and diagnostic messages say "lrex" when run as `lrex`
+/// and "lufs-recorder" when run under that name, rather than hardcoding one.
+/// Falls back to "lufs-recorder" if argv[0] is somehow unavailable/unparsable
+/// (never panics on a missing or malformed argv[0]).
+pub fn invoked_name() -> String {
+    std::env::args_os()
+        .next()
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "lufs-recorder".to_string())
+}
+
+/// Shared entry point for every alias binary this crate ships (`src/bin/*.rs`)
+/// — identical behavior regardless of which name invoked it.
+pub fn run_cli() -> ExitCode {
+    // clap's Command::name()/bin_name() want a `'static str`, not an owned
+    // String; leaking is the standard fix for a value computed once and kept
+    // for the life of a short-lived CLI process (one small, one-time leak,
+    // not a per-call/per-loop leak).
+    let prog: &'static str = Box::leak(invoked_name().into_boxed_str());
+    // Drive clap manually (instead of the `Cli::parse()` convenience) so the
+    // displayed command name matches how the binary was actually invoked,
+    // instead of a name baked in at compile time.
+    let cmd = Cli::command().name(prog).bin_name(prog);
+    let matches = cmd.get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(c) => c,
+        Err(e) => e.exit(),
+    };
     let json = cli.json;
 
     let result = run(&cli);
@@ -216,7 +249,10 @@ fn cmd_init_config(cli: &Cli, out: Option<std::path::PathBuf>, force: bool) -> e
             "wrote default (maxpatch-parity) config to {}",
             path.display()
         );
-        println!("edit `device`, `midi_port`, and `out_dir` for this machine, then `lufs-recorder devices` to confirm names.");
+        println!(
+            "edit `device`, `midi_port`, and `out_dir` for this machine, then `{} devices` to confirm names.",
+            invoked_name()
+        );
     }
     Ok(())
 }
@@ -272,6 +308,6 @@ fn report_error(e: &ExitError, json: bool) {
         });
         println!("{payload}");
     } else {
-        eprintln!("lufs-recorder: {e}");
+        eprintln!("{}: {e}", invoked_name());
     }
 }

@@ -1,19 +1,22 @@
 [package]
 name = "lufs-recorder"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Universal, agent-first CLI for recording any audio device's channels plus MIDI to a verified take."
+description = "Universal, agent-first CLI (lufs-recorder / lrex) for recording any audio device's channels plus MIDI to a verified take."
 license = "GPL-3.0-or-later"
-repository = "https://github.com/danialrami/lufs-recorder"
+repository = "https://github.com/lufs-audio/lufs-recorder"
 authors = ["Daniel Ramirez <danialrami>"]
 readme = "README.md"
 keywords = ["audio", "midi", "recording", "cli", "multichannel"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
-[[bin]]
-name = "lufs-recorder"
-path = "src/main.rs"
+# Package name/identity stays "lufs-recorder" (matches the repo). Two binary
+# targets ship the identical CLI under two invocation names — see
+# src/bin/lufs-recorder.rs and src/bin/lrex.rs (the short, bplate-compliant
+# alias: lufs-audio/bplate docs/units/07-lufs-primitive-cli-naming.md). Both
+# are auto-discovered by Cargo's src/bin/*.rs convention; no [[bin]] needed.
+# src/lib.rs holds the shared implementation both binaries call into.
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

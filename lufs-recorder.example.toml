@@ -1,7 +1,7 @@
-# lufs-recorder config
+# lufs-recorder config (also read by the `lrex` alias — same binary, same config)
 # Defaults below reproduce the midi-audio-recorder Max/MSP patch:
 #   mic on channels 1-2, piano on 9-10, 24-bit, MIDI from a Nord Stage 3.
-# Run `lufs-recorder devices --json` to see the exact device/port names on THIS
+# Run `lrex devices --json` to see the exact device/port names on THIS
 # machine, then edit `device` and `midi_port` to match.
 
 # Audio input device name or substring; "default" = system default input.
@@ -20,7 +20,9 @@ out_dir = "~/Samples/sampleLibrary/lufs-recorder"
 midi_port = "Nord Stage 3"
 
 # Audio track layout. Each [[tracks]] becomes one WAV file capturing the listed
-# 1-based device input channels (two channels = a stereo file).
+# 1-based device input channels (two channels = a stereo file). Only used for
+# single-device capture (--device); multi-device capture (--device-track)
+# defines its tracks on the command line instead.
 [[tracks]]
 name = "mic"
 channels = [1, 2]
@@ -28,3 +30,20 @@ channels = [1, 2]
 [[tracks]]
 name = "piano"
 channels = [9, 10]
+
+# Named auto-stop profiles for `record --profile <name>` (v0.5+; optional, none
+# by default). `record --profile therapy` auto-stops after
+# (auto_stop_minutes + 2*buffer_minutes) minutes from actual recording start —
+# the buffer applies symmetrically on both ends. Uncomment and adjust for a
+# voice-call automation (e.g. mic + call-audio via --device-track):
+# [profiles.therapy]
+# auto_stop_minutes = 60
+# buffer_minutes = 10
+#
+# [profiles.standup]
+# auto_stop_minutes = 30
+# buffer_minutes = 5
+
+# A project-scoped override also works: drop a `.lufs-recorder.toml` (same
+# shape, any subset of fields) in a project directory and it layers over
+# whichever config above was loaded, for invocations from that directory only.

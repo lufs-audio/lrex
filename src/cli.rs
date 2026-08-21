@@ -7,12 +7,18 @@ use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Universal, agent-first audio + MIDI recorder.
+/// Universal, agent-first audio + MIDI recorder. Ships as two identical
+/// binaries — `lufs-recorder` (full name) and `lrex` (short, bplate-compliant
+/// alias) — see `lufs_recorder::run_cli()`, which overrides this derived
+/// command's displayed name/bin_name at runtime to match however it was
+/// actually invoked. The `name` here is intentionally omitted (falls back to
+/// `CARGO_PKG_NAME`) since it's never actually shown — `run_cli()` always sets
+/// it explicitly before parsing.
 ///
 /// Point it at any audio interface, capture an arbitrary subset of that device's
 /// channels alongside MIDI, and get back a take that is *proven* correct.
 #[derive(Parser, Debug)]
-#[command(name = "lufs-recorder", version, about, long_about = None)]
+#[command(version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

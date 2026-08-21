@@ -1,4 +1,4 @@
-# lufs-recorder
+# lufs-recorder (`lrex`)
 
 > A universal, agent-first **capture** primitive. Point it at any audio interface, record an
 > arbitrary set of that device's channels alongside MIDI, and get back a take that is *proven*
@@ -9,11 +9,18 @@ lufs-recorder generalizes the Max/MSP patch [`midi-audio-recorder`](https://gith
 into a portable command-line tool. It is built in **Rust** and is our first production Rust
 project — a deliberate flight test for reliability-critical audio tooling in a systems language.
 
-**Status: `v0.4` — single-device recorder, verified, with a browser control UI.** The CLI
-(`record`, `verify`, `devices`, `selftest`, `init-config`) plus `serve` — a local JSON API + a
-finalized browser front end (Setup · Console · Scope · Glance) with live monitoring. A take is
-captured *and verified against the contract* before it is declared good; a take that dropped frames
-fails by design.
+The project/repo keeps its full descriptive name; the binary also installs as **`lrex`**, a
+short, typeable alias for daily use (`lufs-audio/bplate` `docs/units/07-lufs-primitive-cli-naming.md`
+flags any CLI invocation name over 6 characters, and explicitly recommends an alias — not a
+breaking rename — for an existing daily-driver tool like this one). `lrex` and `lufs-recorder`
+are the exact same binary under two names; every example below works with either.
+
+**Status: `v0.5` — multi-device recorder with named auto-stop profiles, verified, with a browser
+control UI.** The CLI (`record`, `verify`, `devices`, `selftest`, `init-config`) plus `serve` — a
+local JSON API + a finalized browser front end (Setup · Console · Scope · Glance) with live
+monitoring. A take is captured *and verified against the contract* before it is declared good; a
+take that dropped frames fails by design. `record` can now capture from multiple devices at once
+(`--device-track`) and auto-stop on a named profile (`--profile`) instead of a fixed `--duration`.
 
 ## Why it exists
 
@@ -40,7 +47,8 @@ Everything is overridable — per machine via the config file, per take via flag
 ## Build (macOS / klaxon)
 
 A one-shot provisioner is in the repo root. It ensures the C toolchain (Xcode CLT), installs Rust
-if needed, and builds `--release`:
+if needed, and builds `--release` — **both** binaries (`lufs-recorder` and the `lrex` alias) come
+out of the same build, no extra step:
 
 ```sh
 bash provision-and-build.sh            # provision + build
@@ -51,7 +59,7 @@ Or by hand, with a recent stable Rust toolchain (see `rust-toolchain.toml`):
 
 ```sh
 cargo build --release
-./target/release/lufs-recorder --help
+./target/release/lrex --help              # or ./target/release/lufs-recorder --help
 ```
 
 > **macOS mic permission:** the first `record` triggers a microphone permission prompt for your
@@ -61,37 +69,47 @@ cargo build --release
 
 ```sh
 # See your devices/channels + MIDI ports (find the exact names).
-lufs-recorder devices --json
+lrex devices --json
 
 # Write an editable config (device, midi_port, out_dir) — maxpatch parity.
-lufs-recorder init-config          # -> ~/.config/lufs-recorder/config.toml
+lrex init-config                   # -> ~/.config/lufs-recorder/config.toml
 
 # Pre-flight a take without recording (resolves device/format, predicts output).
-lufs-recorder record --dry-run --json
+lrex record --dry-run --json
 
 # Record the parity rig (mic 1-2 + piano 9-10 + Nord Stage 3); Ctrl-C to stop.
-lufs-recorder record --name idea
+lrex record --name idea
 
 # Override per take: any device, any channels, fixed length, MIDI off.
-lufs-recorder record --device "Scarlett 18i20" --channels 1-2,9-10 \
+lrex record --device "Scarlett 18i20" --channels 1-2,9-10 \
   --bit-depth 24 --duration 30 --midi off
 
 # Arbitrary NAMED tracks from the CLI (repeatable). Everything after '=' goes
 # into ONE file; capture several MIDI ports at once with a comma list or "all".
-lufs-recorder record --track mic=1,2 --track piano=9-10 --track room=3-6 \
+lrex record --track mic=1,2 --track piano=9-10 --track room=3-6 \
   --midi "Nord,Syntakt"
 
+# Multi-device: capture two (or more) devices into ONE take. --device-track is
+# the sole multi-device surface — DEVICE:NAME=CHANNELS, repeatable. All devices
+# in a take must share one sample rate (no cross-device resampling).
+lrex record --device-track "BlackHole 2ch:mic=1,2" \
+             --device-track "BlackHole 16ch:call=1,2"
+
+# Named auto-stop profiles (configured in config.toml under [profiles.<name>]):
+# auto-stops after auto_stop_minutes + a symmetric buffer, instead of --duration.
+lrex record --profile therapy
+
 # Re-verify an existing take against the contract.
-lufs-recorder verify ~/Samples/sampleLibrary/lufs-recorder/2026-07-18_1530_idea --json
+lrex verify ~/Samples/sampleLibrary/lufs-recorder/2026-07-18_1530_idea --json
 
 # Prove the build itself is correct — no audio hardware needed (audio de-interleave
 # + WAV round-trip, MIDI SMF export, A/V anchor math).
-lufs-recorder selftest --json
+lrex selftest --json
 
 # Serve the control UI + JSON API (browser control surface over the engine).
-lufs-recorder serve --port 8777              # then open http://127.0.0.1:8777/
-lufs-recorder serve --host 0.0.0.0           # expose on your LAN (other devices)
-lufs-recorder serve --frontend ./frontend    # live-edit the UI without rebuilding
+lrex serve --port 8777              # then open http://127.0.0.1:8777/
+lrex serve --host 0.0.0.0           # expose on your LAN (other devices)
+lrex serve --frontend ./frontend    # live-edit the UI without rebuilding
 ```
 
 ### HTTP API (for a real frontend)
@@ -112,7 +130,7 @@ The stable endpoint contract:
 | `GET /api/takes/<id>/waveform?track=<file>&buckets=N` | peak envelope for a fast waveform |
 | `GET /api/takes/<id>/file/<name>` | raw WAV/MIDI bytes (Web Audio decode / download) |
 | `POST /api/verify` | `{id}` or `{dir}` → manifest + verification |
-| `POST /api/record/start` | `{device?, tracks?|channels?, midi?, rate?, bit_depth?, name?}` |
+| `POST /api/record/start` | `{device?, tracks?\|channels?, midi?, rate?, bit_depth?, name?, devices?, profile?, duration?}` — `devices: [{device, tracks:[{name,channels}]}]` for multi-device (additive alongside `device`); `profile: "<name>"` for a named auto-stop instead of `duration`. Giving both `device`+`devices`, or both `profile`+`duration`, is a 400. |
 | `GET /api/record/status` | `{recording, name?, elapsed_s?, frames?, xruns?, levels?}` — `levels[]` is per-track `{name,peak_dbfs,rms_dbfs,wave[]}`, live while recording (monitoring) |
 | `GET /api/record/stream` | Server-Sent Events: pushes the live snapshot ~12×/s — meters, `wave[]` (signed `[-1,1]` scope samples, ~2400/s, per track) for a real live oscilloscope, `notes[]` (`{key,vel}` note-ons this frame) + `active[]` (held keys) for a live keyboard, and `midi_events` |
 | `POST /api/record/stop` | stop → `{stopped, id, take: manifest}` |
@@ -123,16 +141,20 @@ API is stable regardless of that detail.
 
 `--channels` groups by token: a range `1-2` is one stereo track, a bare `1` is its own mono track,
 so `1-2,9-10` reproduces the two stereo pairs. `--track NAME=CHANNELS` instead names a track and
-puts *all* its channels (commas and ranges) in one file. `--midi` takes a port name, a comma-list
-of substrings (`"Nord,Syntakt"`), `all`, or `off`. `--json` is available on every command; exit
-codes are meaningful (see [CONTRACT.md](CONTRACT.md)) so a supervising agent can branch on the result.
+puts *all* its channels (commas and ranges) in one file. `--device-track DEVICE:NAME=CHANNELS`
+does the same but scoped to one device of several, for multi-device capture. `--midi` takes a port
+name, a comma-list of substrings (`"Nord,Syntakt"`), `all`, or `off`. `--json` is available on
+every command; exit codes are meaningful (see [CONTRACT.md](CONTRACT.md)) so a supervising agent
+can branch on the result.
 
 ## Configuration
 
 Resolution order: `--config <FILE>` → `$LUFS_RECORDER_CONFIG` →
-`~/.config/lufs-recorder/config.toml` → built-in maxpatch defaults. See
-[`lufs-recorder.example.toml`](lufs-recorder.example.toml) for the full annotated file. CLI flags
-override the config; the config overrides the defaults.
+`~/.config/lufs-recorder/config.toml` → built-in maxpatch defaults, then an optional project-local
+`.lufs-recorder.toml` (in the current directory) is layered on top — only the fields it sets
+override, everything else falls through. See [`lufs-recorder.example.toml`](lufs-recorder.example.toml)
+for the full annotated file, including the `[profiles.<name>]` table for named auto-stop profiles.
+CLI flags override the config; the config overrides the defaults.
 
 ## The take
 
@@ -151,9 +173,11 @@ override the config; the config overrides the defaults.
 Every take is measured against what was requested and checked before it's declared good
 (see [CONTRACT.md](CONTRACT.md)): files exist and decode, channel count / sample rate / bit depth
 match, duration is sane, **`xruns == 0`** (the heart of it), MIDI note-ons balance note-offs, and
-the audio isn't digital silence. Dropped frames are detected from the callback capture timestamps
-and from ring-buffer overruns. A/V offset is *reported* in v0.2 and will become a gating check once
-the loopback fixture calibrates it.
+the audio isn't digital silence. For a multi-device take, these same checks also run *per device*
+(`device_no_xruns`, `device_rate_matches`, etc.) so a failure names which device is at fault, not
+just the take as an undifferentiated whole. Dropped frames are detected from the callback capture
+timestamps and from ring-buffer overruns. A/V offset is *reported* and gated to a sane bound; the
+sub-frame residual will become fully calibrated once the loopback fixture runs on real hardware.
 
 ## Design & rationale
 
@@ -161,24 +185,29 @@ The full design record — prior art, the 2026 research landscape, the Rust-vs-C
 decision, the verification contract, the flight-test criteria, and the complete tool spec — lives
 in the shared knowledge base:
 
-**`danialrami/agent-knowledge` → `docs/product/lufs-recorder/`**
+**`lufs-audio/kb` → `docs/product/lufs-recorder/`**
+
+The multi-device + named-profiles feature (v0.5) has its own spec, written per the `speccing`
+skill in `lufs-audio/bplate`'s `docs/units` style:
+
+**`docs/specs/multi-device-and-voice-call-profiles/`** (in this repo)
 
 ## Roadmap
 
+See [CHANGELOG.md](CHANGELOG.md) for the full version-by-version history. Currently:
+
 - **v0.1** — honest skeleton: command surface + failing sentinels. *(done)*
 - **v0.2** — single-device audio + MIDI, maxpatch parity, config file, inline verification. *(done)*
-- **v0.2.x** — `~/.config` standard path; MIDI→audio anchor + latency comp; hanging-note closure;
-  arbitrary named tracks (`--track`), multi-port MIDI; in-process `selftest` fixture.
-- **v0.3** — A/V-offset gating (sane-bound on the live take; math gated by `selftest`); `serve`
-  local control UI + JSON API; take-visualization endpoints (`/notes`, `/waveform`, `/file`). *(done)*
-- **v0.4** — live monitoring: per-track peak/RMS + a decimated waveform envelope over
-  `GET /api/record/status` and SSE `GET /api/record/stream`; the finalized brand-native browser
-  front end (Setup · Console · Scope · Glance). *(you are here)*
-- **Later** — NDJSON progress polish; FLAC output; optional live spectrograph bands + live MIDI in
-  the stream. **Tier 2 / post-v1:** multi-device simultaneous capture (clock-drift physics).
+- **v0.3** — A/V-offset gating; `serve` local control UI + JSON API; take-visualization endpoints. *(done)*
+- **v0.4** — live monitoring (per-track peak/RMS + waveform over `status`/SSE); finalized brand-native
+  browser front end (Setup · Console · Scope · Glance). *(done)*
+- **v0.5** — multi-device concurrent capture (`--device-track`, one sample rate per take, per-device
+  verification); named auto-stop profiles + project-scoped config override; the `lrex` short CLI
+  alias. *(done — this release. Not yet verified against real multi-device hardware; see
+  `docs/specs/multi-device-and-voice-call-profiles/SPEC.md` §6.)*
+- **Later** — NDJSON progress polish; FLAC output; optional live spectrograph bands; a TUI (meters/
+  timecode/REC dot), deferred to a cross-tool TUI style guide.
 - **v1.0** — hardening, macOS + Linux static binaries, CI running the contract end-to-end.
-- **Tier 2 (best-effort, post-v1)** — multi-device simultaneous capture via per-OS backends, with
-  documented clock-drift risk. Does *not* gate v1.
 
 ## License
 
