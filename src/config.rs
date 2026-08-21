@@ -7,16 +7,24 @@
 //!   2. `$LUFS_RECORDER_CONFIG`
 //!   3. `~/.config/lufs-recorder/config.toml`
 //!
-//! If none exists, the built-in maxpatch-parity defaults are used.
+//! If none exists, the built-in maxpatch-parity defaults are used. On top of
+//! whichever of those is loaded, an optional project-local `.lufs-recorder.toml`
+//! in the current working directory is layered over it — see
+//! [`ProjectOverride`] and `load()` below.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The maxpatch default save path was
 /// `~/Samples/sampleLibrary/midi-audio-recorder_max/`; we keep the family but
 /// name the new tool.
 const DEFAULT_OUT_DIR: &str = "~/Samples/sampleLibrary/lufs-recorder";
+
+/// Filename for a project-scoped config override, discovered relative to the
+/// current working directory (see `load()`).
+const PROJECT_OVERRIDE_FILENAME: &str = ".lufs-recorder.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +42,13 @@ pub struct Config {
     /// Audio track layout. Each entry becomes one WAV file capturing the listed
     /// 1-based device input channels.
     pub tracks: Vec<TrackConfig>,
+    /// Named auto-stop profiles for `record --profile <name>`, e.g. a "therapy"
+    /// profile that auto-stops a call recording after an hour plus a buffer.
+    /// Entirely user-defined — nothing here is hardcoded into the binary.
+    /// Absent from a config file, this defaults to empty so every pre-existing
+    /// config keeps loading and behaving exactly as before.
+    #[serde(default)]
+    pub profiles: HashMap<String, ProfileConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +56,67 @@ pub struct Config {
 pub struct TrackConfig {
     pub name: String,
     pub channels: Vec<u16>,
+}
+
+/// A named auto-stop profile: `record --profile therapy` sets the capture
+/// duration from these two numbers instead of requiring an explicit
+/// `--duration`. See [`resolve_profile_duration_secs`] for the exact math.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileConfig {
+    /// Minutes from recording start after which capture auto-stops.
+    pub auto_stop_minutes: f64,
+    /// Minutes of slack applied on both ends (see `resolve_profile_duration_secs`
+    /// doc comment for the exact interpretation and why).
+    pub buffer_minutes: f64,
+}
+
+/// The project-local override file (`.lufs-recorder.toml`): every field is
+/// optional, and only the fields actually present override the base config —
+/// this is NOT a full `Config`, so a project file only needs to name what it
+/// wants to change (e.g. just `device`, for a machine-specific interface).
+/// `deny_unknown_fields` still applies: a typo'd field name fails loudly rather
+/// than being silently ignored, exactly like the base config.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectOverride {
+    device: Option<String>,
+    rate: Option<String>,
+    bit_depth: Option<String>,
+    out_dir: Option<String>,
+    midi_port: Option<String>,
+    tracks: Option<Vec<TrackConfig>>,
+    /// Profiles merge key-by-key into the base config's profile map (a project
+    /// file can add or override individual named profiles without repeating
+    /// every profile from the global config).
+    profiles: Option<HashMap<String, ProfileConfig>>,
+}
+
+impl ProjectOverride {
+    /// Apply this override onto `base` in place — only `Some` fields change.
+    fn apply_to(self, base: &mut Config) {
+        if let Some(v) = self.device {
+            base.device = v;
+        }
+        if let Some(v) = self.rate {
+            base.rate = v;
+        }
+        if let Some(v) = self.bit_depth {
+            base.bit_depth = v;
+        }
+        if let Some(v) = self.out_dir {
+            base.out_dir = v;
+        }
+        if let Some(v) = self.midi_port {
+            base.midi_port = v;
+        }
+        if let Some(v) = self.tracks {
+            base.tracks = v;
+        }
+        if let Some(v) = self.profiles {
+            base.profiles.extend(v);
+        }
+    }
 }
 
 impl Default for Config {
@@ -62,25 +138,54 @@ impl Default for Config {
                     channels: vec![9, 10],
                 },
             ],
+            profiles: HashMap::new(),
         }
     }
 }
 
 impl Config {
     /// Load the config from an explicit path, the env var, or the default
-    /// location. Returns the parity defaults if nothing is found.
+    /// location (returns the parity defaults if nothing is found), THEN layer
+    /// an optional `.lufs-recorder.toml` from the current working directory on
+    /// top of it. Project-override discovery failures (missing file) are silent
+    /// — it's opt-in; parse/validation failures in a file that DOES exist are
+    /// not (same `deny_unknown_fields` strictness as the base config, so a
+    /// typo'd field in the project file fails loudly rather than being ignored).
     pub fn load(explicit: Option<&Path>) -> Result<(Config, Option<PathBuf>)> {
-        if let Some(path) = resolve_path(explicit) {
+        let (mut cfg, source) = if let Some(path) = resolve_path(explicit) {
             if path.exists() {
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading config {}", path.display()))?;
                 let cfg: Config = toml::from_str(&text)
                     .with_context(|| format!("parsing config {}", path.display()))?;
                 cfg.validate()?;
-                return Ok((cfg, Some(path)));
+                (cfg, Some(path))
+            } else {
+                (Config::default(), None)
+            }
+        } else {
+            (Config::default(), None)
+        };
+
+        if let Some(project_path) = project_override_path() {
+            if project_path.exists() {
+                let text = std::fs::read_to_string(&project_path).with_context(|| {
+                    format!("reading project config {}", project_path.display())
+                })?;
+                let over: ProjectOverride = toml::from_str(&text).with_context(|| {
+                    format!("parsing project config {}", project_path.display())
+                })?;
+                over.apply_to(&mut cfg);
+                cfg.validate().with_context(|| {
+                    format!(
+                        "config invalid after applying project override {}",
+                        project_path.display()
+                    )
+                })?;
             }
         }
-        Ok((Config::default(), None))
+
+        Ok((cfg, source))
     }
 
     fn validate(&self) -> Result<()> {
@@ -101,6 +206,14 @@ impl Config {
                 anyhow::bail!("track {:?} has a 0 channel; channels are 1-based", t.name);
             }
         }
+        for (name, p) in &self.profiles {
+            if p.auto_stop_minutes <= 0.0 {
+                anyhow::bail!("profile {name:?} auto_stop_minutes must be > 0");
+            }
+            if p.buffer_minutes < 0.0 {
+                anyhow::bail!("profile {name:?} buffer_minutes must be >= 0");
+            }
+        }
         Ok(())
     }
 
@@ -117,6 +230,35 @@ impl Config {
     pub fn out_path(&self) -> PathBuf {
         expand_tilde(&self.out_dir)
     }
+}
+
+/// Resolve `record --profile <name>` against `cfg.profiles` into a capture
+/// duration in seconds.
+///
+/// Interpretation of "buffer applies on both ends" (the proposal's own words —
+/// confirmed with Daniel 2026-08-21): the buffer is added symmetrically around
+/// the auto-stop length, measured from *actual* recording start —
+/// `(auto_stop_minutes + 2 * buffer_minutes) * 60`. "Start early" is the
+/// caller's responsibility (the agent/automation invokes `record --profile`
+/// before the nominal event time); this function only ever needs to know when
+/// recording actually started, never a separate "nominal" event time, so no new
+/// scheduling concept exists anywhere in the config or API surface.
+///
+/// Returns an explicit error for an unknown profile name — never a silent
+/// fallback to an undocumented default duration.
+pub fn resolve_profile_duration_secs(cfg: &Config, profile_name: &str) -> Result<f64> {
+    let p = cfg.profiles.get(profile_name).ok_or_else(|| {
+        let known: Vec<&str> = cfg.profiles.keys().map(|s| s.as_str()).collect();
+        anyhow::anyhow!(
+            "unknown profile {profile_name:?}; configured profiles: {}",
+            if known.is_empty() {
+                "(none)".to_string()
+            } else {
+                known.join(", ")
+            }
+        )
+    })?;
+    Ok((p.auto_stop_minutes + 2.0 * p.buffer_minutes) * 60.0)
 }
 
 pub fn validate_bit_depth(s: &str) -> Result<()> {
@@ -145,6 +287,14 @@ fn resolve_path(explicit: Option<&Path>) -> Option<PathBuf> {
         }
     }
     default_config_path()
+}
+
+/// `.lufs-recorder.toml` in the current working directory, or `None` if the
+/// cwd can't be determined (never fatal — project override is opt-in).
+fn project_override_path() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .map(|d| d.join(PROJECT_OVERRIDE_FILENAME))
 }
 
 /// Expand a leading "~" to the user's home directory.
@@ -195,6 +345,12 @@ channels = [1, 2]
 [[tracks]]
 name = "piano"
 channels = [9, 10]
+
+# Named auto-stop profiles for `record --profile <name>` (optional; none by
+# default). Example — uncomment and adjust for a voice-call automation:
+# [profiles.therapy]
+# auto_stop_minutes = 60
+# buffer_minutes = 10
 "#
     )
 }
@@ -211,6 +367,7 @@ mod tests {
         assert_eq!(c.tracks.len(), 2);
         assert_eq!(c.tracks[0].channels, vec![1, 2]);
         assert_eq!(c.tracks[1].channels, vec![9, 10]);
+        assert!(c.profiles.is_empty());
     }
 
     #[test]
@@ -234,5 +391,104 @@ mod tests {
         assert_eq!(c.rate_hz(), None);
         c.rate = "48000".into();
         assert_eq!(c.rate_hz(), Some(48000));
+    }
+
+    #[test]
+    fn old_config_without_profiles_table_still_parses() {
+        // Exactly today's emitted config, pre-profiles: no [profiles.*] section
+        // at all. `#[serde(default)]` must make this load exactly as before.
+        let text = r#"
+device = "default"
+rate = "default"
+bit_depth = "24"
+out_dir = "~/Samples/sampleLibrary/lufs-recorder"
+midi_port = "Nord Stage 3"
+
+[[tracks]]
+name = "mic"
+channels = [1, 2]
+"#;
+        let cfg: Config = toml::from_str(text).expect("pre-profiles config must still parse");
+        cfg.validate().expect("must still validate");
+        assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn profile_duration_is_auto_stop_plus_symmetric_buffer() {
+        let mut c = Config::default();
+        c.profiles.insert(
+            "therapy".to_string(),
+            ProfileConfig {
+                auto_stop_minutes: 60.0,
+                buffer_minutes: 10.0,
+            },
+        );
+        // (60 + 2*10) * 60 = 4800s.
+        let secs = resolve_profile_duration_secs(&c, "therapy").unwrap();
+        assert!((secs - 4800.0).abs() < 1e-9, "got {secs}");
+    }
+
+    #[test]
+    fn profile_duration_zero_buffer_is_just_auto_stop() {
+        let mut c = Config::default();
+        c.profiles.insert(
+            "standup".to_string(),
+            ProfileConfig {
+                auto_stop_minutes: 30.0,
+                buffer_minutes: 0.0,
+            },
+        );
+        let secs = resolve_profile_duration_secs(&c, "standup").unwrap();
+        assert!((secs - 1800.0).abs() < 1e-9, "got {secs}");
+    }
+
+    #[test]
+    fn unknown_profile_is_an_explicit_error_not_a_silent_default() {
+        let c = Config::default();
+        let err = resolve_profile_duration_secs(&c, "nope").unwrap_err();
+        assert!(err.to_string().contains("unknown profile"));
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_auto_stop() {
+        let mut c = Config::default();
+        c.profiles.insert(
+            "bad".to_string(),
+            ProfileConfig {
+                auto_stop_minutes: 0.0,
+                buffer_minutes: 0.0,
+            },
+        );
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn project_override_changes_only_named_fields() {
+        let mut base = Config::default();
+        let over_text = r#"
+device = "BlackHole 2ch"
+
+[profiles.therapy]
+auto_stop_minutes = 60
+buffer_minutes = 10
+"#;
+        let over: ProjectOverride = toml::from_str(over_text).unwrap();
+        over.apply_to(&mut base);
+        assert_eq!(base.device, "BlackHole 2ch");
+        // Untouched fields keep their base values.
+        assert_eq!(base.bit_depth, "24");
+        assert_eq!(base.tracks.len(), 2);
+        assert_eq!(base.profiles.len(), 1);
+        assert!(base.profiles.contains_key("therapy"));
+    }
+
+    #[test]
+    fn project_override_rejects_unknown_field() {
+        let bad = r#"not_a_real_field = "oops""#;
+        let parsed: std::result::Result<ProjectOverride, _> = toml::from_str(bad);
+        assert!(
+            parsed.is_err(),
+            "a typo'd project-override field must fail loudly, not be silently ignored"
+        );
     }
 }
