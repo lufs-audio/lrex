@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# provision-and-build.sh — one-shot provision + build for lufs-recorder.
+# provision-and-build.sh — one-shot provision + build for lufs-recorder / lrex.
 #
-# Brings a fresh machine (built for macOS / klaxon; also works on Linux) to a
-# runnable `lufs-recorder` binary:
+# Brings a fresh machine (built for macOS / klaxon; also works on Linux) to
+# runnable binaries:
 #   1. ensures a C toolchain / SDK  (Xcode CLT on macOS; ALSA+JACK dev on Linux)
 #   2. ensures a Rust toolchain      (installs rustup if missing)
-#   3. builds --release
-#   4. prints the binary path + next steps
+#   3. builds --release              (produces BOTH `lufs-recorder` and the
+#                                      short `lrex` alias from one build — see
+#                                      src/lib.rs + src/bin/*.rs)
+#   4. prints the binary paths + next steps
 #
 # Usage:
 #   bash provision-and-build.sh            # provision + build
@@ -76,28 +78,34 @@ fi
 say "Using $(cargo --version)"
 
 # --- 3. Build ----------------------------------------------------------------
-say "Building lufs-recorder (release)…"
+say "Building lufs-recorder + lrex (release)…"
 cargo build --release
 
-BIN="$REPO_DIR/target/release/lufs-recorder"
-[ -x "$BIN" ] || die "build finished but $BIN is missing"
+BIN_FULL="$REPO_DIR/target/release/lufs-recorder"
+BIN_SHORT="$REPO_DIR/target/release/lrex"
+[ -x "$BIN_FULL" ] || die "build finished but $BIN_FULL is missing"
+[ -x "$BIN_SHORT" ] || die "build finished but $BIN_SHORT (the lrex alias) is missing"
 
-say "Built: $BIN"
+say "Built: $BIN_FULL"
+say "Built: $BIN_SHORT  (short alias — same binary, same behavior)"
 echo
-say "Next steps:"
+say "Next steps (using the short alias; lufs-recorder works identically):"
 cat <<EOF
   # 1. See your devices + MIDI ports (find the exact names):
-  $BIN devices
+  $BIN_SHORT devices
 
-  # 2. Write a config you can edit (device, midi_port, out_dir):
-  $BIN init-config          # -> ~/.config/lufs-recorder/config.toml
+  # 2. Write a config you can edit (device, midi_port, out_dir, profiles):
+  $BIN_SHORT init-config     # -> ~/.config/lufs-recorder/config.toml
 
   # 3. Pre-flight without recording:
-  $BIN record --dry-run
+  $BIN_SHORT record --dry-run
 
   # 4. Record a maxpatch-parity take (mic 1-2 + piano 9-10 + Nord Stage 3),
   #    Ctrl-C to stop; the take is verified before it's declared good:
-  $BIN record --name idea
+  $BIN_SHORT record --name idea
+
+  # 5. Multi-device (v0.5): capture two devices into one take.
+  #    $BIN_SHORT record --device-track "DEVICE A:mic=1,2" --device-track "DEVICE B:call=1,2"
 
   # macOS: the first 'record' triggers a microphone permission prompt for your
   # terminal (System Settings ▸ Privacy & Security ▸ Microphone). Approve it.
@@ -107,5 +115,5 @@ EOF
 if [ "${1:-}" = "--run-devices" ]; then
   echo
   say "Your current devices + MIDI ports:"
-  "$BIN" devices || warn "device enumeration failed (no audio backend on this machine?)"
+  "$BIN_SHORT" devices || warn "device enumeration failed (no audio backend on this machine?)"
 fi
