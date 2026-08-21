@@ -80,19 +80,25 @@ pub enum Command {
 #[derive(Args, Debug, Default)]
 pub struct RecordArgs {
     /// Audio input device (name or substring). Default: config / system default.
-    #[arg(long)]
+    /// Single-device only — unchanged from v0.2. For multi-device capture, use
+    /// `--device-track` instead (it's the sole multi-device surface, so there is
+    /// never ambiguity about which tracks belong to which device).
+    #[arg(long, conflicts_with = "device_track")]
     pub device: Option<String>,
 
     /// Channel layout, e.g. "1-2,9-10" (two stereo tracks) or "1,2" (two mono
     /// tracks). A range "a-b" is one grouped track; a bare "n" is its own track.
-    /// Overrides the config's track layout.
+    /// Overrides the config's track layout. Single-device only; use
+    /// `--device-track` for multi-device.
     #[arg(long)]
     pub channels: Option<String>,
 
     /// Define a named track (repeatable): NAME=CHANNELS, e.g.
     /// `--track mic=1,2 --track piano=9-10 --track room=3-6`. Everything after
     /// '=' goes into ONE file (commas and ranges both expand). Overrides the
-    /// config track layout; can't be combined with --channels.
+    /// config track layout; can't be combined with --channels. Applies to the
+    /// first (or only) `--device`; use `--device-track` for explicit per-device
+    /// assignment across multiple devices.
     #[arg(
         long = "track",
         value_name = "NAME=CHANNELS",
@@ -100,11 +106,26 @@ pub struct RecordArgs {
     )]
     pub track: Vec<String>,
 
+    /// Explicit per-device track assignment for multi-device capture
+    /// (repeatable): `DEVICE:NAME=CHANNELS`, e.g.
+    /// `--device-track "BlackHole 2ch:mic=1,2" --device-track "BlackHole 16ch:call=1,2"`.
+    /// When given, this is the sole source of device+track layout — it can't be
+    /// combined with `--device`, `--track`, or `--channels` (ambiguous which
+    /// device a bare track belongs to).
+    #[arg(
+        long = "device-track",
+        value_name = "DEVICE:NAME=CHANNELS",
+        conflicts_with_all = ["device", "track", "channels"]
+    )]
+    pub device_track: Vec<String>,
+
     /// MIDI input to arm: a port name/substring, "all", or "off".
     #[arg(long)]
     pub midi: Option<String>,
 
-    /// Sample rate in Hz. Default: config / device default.
+    /// Sample rate in Hz. Default: config / device default. All devices in a
+    /// multi-device take must resolve to this same rate (no cross-device
+    /// resampling) — see CONTRACT.md.
     #[arg(long)]
     pub rate: Option<u32>,
 
@@ -121,8 +142,15 @@ pub struct RecordArgs {
     pub name: Option<String>,
 
     /// Fixed capture length in seconds. Omit to run until interrupted (Ctrl-C).
-    #[arg(long)]
+    /// Mutually exclusive with --profile (which computes this from config).
+    #[arg(long, conflicts_with = "profile")]
     pub duration: Option<f64>,
+
+    /// Named auto-stop profile from config (e.g. "therapy", "standup"). Sets
+    /// the capture duration from the profile's `auto_stop_minutes` +
+    /// `buffer_minutes` instead of an explicit --duration.
+    #[arg(long)]
+    pub profile: Option<String>,
 
     /// Validate + predict the take without capturing anything.
     #[arg(long)]
@@ -227,6 +255,22 @@ pub fn parse_track_arg(s: &str) -> Result<(String, Vec<u16>)> {
     Ok((name.to_string(), parse_channel_list(chans)?))
 }
 
+/// Parse a `--device-track DEVICE:NAME=CHANNELS` value into
+/// `(device_query, name, channels)`. The device portion is everything before
+/// the FIRST `:` (device names don't contain `:` in practice on any backend
+/// cpal targets); the remainder is parsed exactly like `--track`.
+pub fn parse_device_track_arg(s: &str) -> Result<(String, String, Vec<u16>)> {
+    let (device, rest) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("--device-track expects DEVICE:NAME=CHANNELS, got '{s}'"))?;
+    let device = device.trim();
+    if device.is_empty() {
+        bail!("--device-track device is empty in '{s}'");
+    }
+    let (name, channels) = parse_track_arg(rest)?;
+    Ok((device.to_string(), name, channels))
+}
+
 /// A default, human-friendly track name for a CLI-specified channel group.
 pub fn default_track_name(channels: &[u16]) -> String {
     match channels {
@@ -293,5 +337,20 @@ mod tests {
         );
         assert!(parse_track_arg("noequals").is_err());
         assert!(parse_track_arg("=1,2").is_err());
+    }
+
+    #[test]
+    fn device_track_arg_parses_device_name_and_channels() {
+        assert_eq!(
+            parse_device_track_arg("BlackHole 2ch:mic=1,2").unwrap(),
+            ("BlackHole 2ch".to_string(), "mic".to_string(), vec![1, 2])
+        );
+        assert_eq!(
+            parse_device_track_arg("BlackHole 16ch:call=1-2").unwrap(),
+            ("BlackHole 16ch".to_string(), "call".to_string(), vec![1, 2])
+        );
+        assert!(parse_device_track_arg("no-colon-here").is_err());
+        assert!(parse_device_track_arg(":mic=1,2").is_err());
+        assert!(parse_device_track_arg("Device:noequals").is_err());
     }
 }
