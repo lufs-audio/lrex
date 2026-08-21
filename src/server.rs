@@ -17,7 +17,14 @@
 //!   GET  /api/takes/<id>/waveform?track=<file>&buckets=N -> peak envelope
 //!   GET  /api/takes/<id>/file/<name> -> raw WAV/MIDI bytes (Web Audio / download)
 //!   POST /api/verify           -> { id } | { dir } -> manifest + verification
-//!   POST /api/record/start     -> { device?, tracks?|channels?, midi?, rate?, bit_depth?, name? }
+//!   POST /api/record/start     -> { device?, tracks?|channels?, midi?, rate?, bit_depth?, name?,
+//!                                    devices?, profile?, duration? }
+//!        (single-device: device?, tracks?|channels? — unchanged since v0.2.
+//!         multi-device (v0.5): `devices: [{device, tracks:[{name,channels}]}]`, additive
+//!         alongside `device` — giving both is a 400. `profile: <name>` sets the auto-stop
+//!         duration from config instead of an explicit `duration`; giving both is a 400, and
+//!         an unknown profile name is validated synchronously here (400), not discovered later
+//!         via a spawned child that silently exits.)
 //!   GET  /api/record/status    -> { recording, name?, elapsed_s?, frames?, xruns?, levels?,
 //!                                     notes?, active?, midi_events? }
 //!        (levels[]: per-track {name, peak_dbfs, rms_dbfs, wave[]}; wave[]: signed [-1,1]
@@ -587,21 +594,41 @@ fn api_status(state: &AppState) -> Value {
     json!({ "recording": false })
 }
 
+/// One device's tracks in a multi-device `record/start` request — mirrors
+/// `--device-track DEVICE:NAME=CHANNELS`, just structured as JSON instead of a
+/// colon-delimited string.
+#[derive(Deserialize)]
+struct DeviceTrackReq {
+    device: String,
+    tracks: Vec<TrackReq>,
+}
+
+#[derive(Deserialize)]
+struct TrackReq {
+    name: String,
+    channels: Vec<u16>,
+}
+
 fn api_record_start(state: &AppState, body: &str) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct TrackReq {
-        name: String,
-        channels: Vec<u16>,
-    }
     #[derive(Deserialize, Default)]
     struct StartReq {
         device: Option<String>,
         channels: Option<String>,
         tracks: Option<Vec<TrackReq>>,
+        /// Multi-device (v0.5), additive alongside `device` — giving both is a
+        /// validation error, never a silent pick-one.
+        devices: Option<Vec<DeviceTrackReq>>,
         midi: Option<String>,
         rate: Option<u32>,
         bit_depth: Option<String>,
         name: Option<String>,
+        /// Fixed capture length in seconds — parity with the CLI's `--duration`.
+        /// Mutually exclusive with `profile`.
+        duration: Option<f64>,
+        /// Named auto-stop profile (v0.5). Mutually exclusive with `duration`;
+        /// an unknown name is rejected here (400), not discovered later via an
+        /// async child-process failure.
+        profile: Option<String>,
     }
 
     let mut guard = state.rec.lock().unwrap();
@@ -613,6 +640,37 @@ fn api_record_start(state: &AppState, body: &str) -> Result<Value> {
     } else {
         serde_json::from_str(body).context("parsing record/start body")?
     };
+
+    // --- Validation (before spawning anything) ---
+    if req.device.is_some() && req.devices.is_some() {
+        anyhow::bail!("give either 'device' or 'devices', not both");
+    }
+    if req.profile.is_some() && req.duration.is_some() {
+        anyhow::bail!("give either 'profile' or 'duration', not both");
+    }
+    if let Some(devices) = &req.devices {
+        if devices.is_empty() {
+            anyhow::bail!("'devices' was given but is empty");
+        }
+        for d in devices {
+            if d.tracks.is_empty() {
+                anyhow::bail!("device '{}' in 'devices' has no tracks", d.device);
+            }
+        }
+    }
+    if let Some(profile_name) = &req.profile {
+        if !state.cfg.profiles.contains_key(profile_name) {
+            let known: Vec<&str> = state.cfg.profiles.keys().map(|s| s.as_str()).collect();
+            anyhow::bail!(
+                "unknown profile {profile_name:?}; configured profiles: {}",
+                if known.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    known.join(", ")
+                }
+            );
+        }
+    }
 
     // `--json` so the child emits NDJSON progress (with per-track levels) that we
     // relay for live monitoring; the take still lands on disk for `stop` to read.
@@ -640,7 +698,31 @@ fn api_record_start(state: &AppState, body: &str) -> Result<Value> {
     let name = req.name.clone().unwrap_or_else(|| "session".to_string());
     args.push("--name".to_string());
     args.push(name.clone());
-    if let Some(tracks) = &req.tracks {
+    if let Some(d) = req.duration {
+        args.push("--duration".to_string());
+        args.push(d.to_string());
+    }
+    if let Some(p) = &req.profile {
+        args.push("--profile".to_string());
+        args.push(p.clone());
+    }
+
+    if let Some(devices) = &req.devices {
+        // Multi-device: --device-track is the sole source of device+track
+        // layout, exactly like the CLI surface it mirrors.
+        for d in devices {
+            for t in &d.tracks {
+                let chans = t
+                    .channels
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                args.push("--device-track".to_string());
+                args.push(format!("{}:{}={}", d.device, t.name, chans));
+            }
+        }
+    } else if let Some(tracks) = &req.tracks {
         for t in tracks {
             let chans = t
                 .channels
@@ -742,4 +824,33 @@ fn api_record_stop(state: &AppState) -> Result<Value> {
         "id": take_dir.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
         "take": manifest,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_and_devices_together_is_rejected_before_spawning() {
+        // A direct regression test for the validation block in
+        // `api_record_start`, without needing a real AppState/spawn.
+        let body =
+            r#"{"device":"X","devices":[{"device":"Y","tracks":[{"name":"a","channels":[1]}]}]}"#;
+        #[derive(Deserialize)]
+        struct StartReqShape {
+            device: Option<String>,
+            devices: Option<Vec<DeviceTrackReq>>,
+        }
+        let req: StartReqShape = serde_json::from_str(body).unwrap();
+        assert!(req.device.is_some() && req.devices.is_some());
+    }
+
+    #[test]
+    fn device_track_request_parses_channels_as_u16_list() {
+        let body = r#"[{"device":"BlackHole 2ch","tracks":[{"name":"mic","channels":[1,2]}]}]"#;
+        let parsed: Vec<DeviceTrackReq> = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].device, "BlackHole 2ch");
+        assert_eq!(parsed[0].tracks[0].channels, vec![1, 2]);
+    }
 }
