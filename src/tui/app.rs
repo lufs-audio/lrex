@@ -98,7 +98,11 @@ impl AppState {
         let stale = if self.is_stale() { " · ⊘ stale" } else { "" };
         match self.connection {
             Connection::Unreachable => format!("{}:{} · unreachable", self.host, self.port),
-            _ => match &self.take_name {
+            // Distinct from "idle" below -- no SSE frame has arrived yet at
+            // all, so we don't actually know the server's state; saying
+            // "idle" here would be a guess dressed up as a fact.
+            Connection::Connecting => format!("{}:{} · connecting…", self.host, self.port),
+            Connection::Connected => match &self.take_name {
                 Some(n) if self.recording => {
                     format!("{}:{} · take {n}{stale}", self.host, self.port)
                 }
@@ -155,9 +159,15 @@ impl AppState {
                 .collect();
         }
         if let Some(active) = v.get("active").and_then(|x| x.as_array()) {
+            // `u8::try_from` -- not `as u8` -- deliberately: a MIDI key is
+            // 0-127 by definition, so anything outside `0..=255` is already
+            // malformed input. `as u8` would silently wrap it into a
+            // plausible-looking but wrong key number (e.g. 300 -> 44);
+            // dropping it is the honest response to data that doesn't fit
+            // the field it's claiming to be.
             self.active_midi = active
                 .iter()
-                .filter_map(|x| x.as_u64().map(|n| n as u8))
+                .filter_map(|x| x.as_u64().and_then(|n| u8::try_from(n).ok()))
                 .collect();
         }
         self.midi_events = v
@@ -555,9 +565,41 @@ mod tests {
     #[test]
     fn masthead_meta_reports_unreachable_distinctly_from_idle() {
         let mut state = AppState::new("127.0.0.1".to_string(), 8777, Theme::lufs());
+        state.connection = Connection::Connected;
         assert!(state.masthead_meta().contains("idle"));
         state.connection = Connection::Unreachable;
         assert!(state.masthead_meta().contains("unreachable"));
+    }
+
+    #[test]
+    fn masthead_meta_distinguishes_connecting_from_idle() {
+        // A fresh state hasn't heard from the server at all yet -- saying
+        // "idle" would be presenting a guess as an observed fact. Only once
+        // a frame has actually arrived (connection flips to `Connected`)
+        // should "idle" appear.
+        let state = AppState::new("127.0.0.1".to_string(), 8777, Theme::lufs());
+        assert_eq!(state.connection, Connection::Connecting);
+        let meta = state.masthead_meta();
+        assert!(meta.contains("connecting"), "got: {meta}");
+        assert!(!meta.contains("idle"), "got: {meta}");
+    }
+
+    #[test]
+    fn active_midi_drops_out_of_range_values_instead_of_wrapping() {
+        let mut state = AppState::new("127.0.0.1".to_string(), 8777, Theme::lufs());
+        state.apply_frame(serde_json::json!({
+            "recording": true,
+            "elapsed_s": 1.0,
+            "name": "midi-edge-case",
+            "frames": 48000u64,
+            "xruns": 0,
+            "levels": [],
+            // 300 would silently wrap to 44 under `n as u8`; -1 isn't a u64
+            // at all so `as_u64()` already excludes it upstream. Only
+            // genuinely in-range values should survive.
+            "active": [60, 300, 255, -1]
+        }));
+        assert_eq!(state.active_midi, vec![60, 255]);
     }
 
     #[test]

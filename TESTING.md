@@ -282,7 +282,9 @@ Press `q` in the TUI to exit (expect exit `0`), then `kill %1` to stop `serve`.
 
 **Also worth a quick look while it's running:** switch `--theme` (rerun with `catppuccin` and
 `mono`) and confirm the meters/state are equally readable in each — the `mono` theme in particular
-should never rely on color alone (every state also carries a distinct glyph: `○◐✓✗⊘`).
+should never rely on color alone: a meter's level should still be readable from its bar length and
+the numeric `pk`/`rms` dBFS readout beside it (not just a color-zone change), and `REC` / stale
+should still read as the words they are, not just a colored dot.
 
 **Bonus, not required:** the TUI also has a staleness signal — if it's connected but hasn't heard
 from `serve` in 3+ seconds it shows `⊘ stale` in the masthead. This should only ever be

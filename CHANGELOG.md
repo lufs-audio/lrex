@@ -23,10 +23,15 @@ exact. Entries from 0.5.0 onward are written as each change lands.
 - Three runtime-selectable themes (`--theme lufs|catppuccin|mono`, default `lufs`): the LUFS brand
   palette, Catppuccin Mocha (verified against upstream catppuccin theme files, not guessed), and a
   WCAG-contrast-verified monochrome/accessibility theme that never encodes state in color alone —
-  every meter and status also carries a distinct glyph (`○◐✓✗⊘`). One binary, one layout, three
-  palettes, no compile-time theme fork. This is the first tool built against the cross-tool TUI
-  style guide banked at `lufs-audio/bplate` `references/studies/tui-style-directions/`, so
-  `lrex tui` and `bplate wizard` now share one interaction shape and theme set by design, not
+  every meter reads by bar length + its numeric dBFS readout, not by the color-zone shift the
+  other two themes add on top; REC and stale states are always spelled out in text (`REC`,
+  `⊘ stale`), never signaled by color alone. (This live monitor's states — idle/recording/
+  unreachable/stale — don't map onto `bplate wizard`'s discrete step sequence, so it doesn't reuse
+  that tool's `○◐✓✗⊘` step-indicator glyphs; the shared contract across both tools is the
+  never-color-alone rule and the three palettes, not one literal icon set.) One binary, one
+  layout, three palettes, no compile-time theme fork. This is the first tool built against the
+  cross-tool TUI style guide banked at `lufs-audio/bplate` `references/studies/tui-style-directions/`,
+  so `lrex tui` and `bplate wizard` now share one interaction shape and theme set by design, not
   coincidence.
 - Timecode renders at film-editing convention (starts at `01:00:00.00`, `src/tui/app.rs`'s
   `format_timecode`) rather than counting up from zero, matching how the target audience
