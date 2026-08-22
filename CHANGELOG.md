@@ -7,6 +7,55 @@ Entries before this file existed (everything through 0.4.3) are reconstructed fr
 commit and PR history (`git log` / GitHub PRs #2-#17), not invented — dates and PR numbers are
 exact. Entries from 0.5.0 onward are written as each change lands.
 
+## [0.5.1] - 2026-08-22
+
+### Added
+- `lrex tui` / `lufs-recorder tui` — an optional, terminal-native **monitor** for a running
+  `serve` process: masthead (tool name, host:port, connection state), a live per-track peak/RMS
+  meter and film-convention timecode while a take is in progress, distinct idle/unreachable empty
+  states (never a silent hang), a footer with the exact `curl` equivalent of what the TUI itself
+  is doing plus key hints, and `q`/Esc to quit cleanly. Reads the existing
+  `GET /api/record/stream` SSE feed and reconnects on its own short timer for every disconnect —
+  idle streams close after exactly one frame by design (see `src/server.rs`'s stream doc comment)
+  — so a disconnect is treated as routine, not an error. It opens **no new endpoints** and issues
+  **no record start/stop commands**: the CLI and `serve`'s browser UI remain the only control
+  surfaces; this is read-only. (`src/tui/`)
+- Three runtime-selectable themes (`--theme lufs|catppuccin|mono`, default `lufs`): the LUFS brand
+  palette, Catppuccin Mocha (verified against upstream catppuccin theme files, not guessed), and a
+  WCAG-contrast-verified monochrome/accessibility theme that never encodes state in color alone —
+  every meter and status also carries a distinct glyph (`○◐✓✗⊘`). One binary, one layout, three
+  palettes, no compile-time theme fork. This is the first tool built against the cross-tool TUI
+  style guide banked at `lufs-audio/bplate` `references/studies/tui-style-directions/`, so
+  `lrex tui` and `bplate wizard` now share one interaction shape and theme set by design, not
+  coincidence.
+- Timecode renders at film-editing convention (starts at `01:00:00.00`, `src/tui/app.rs`'s
+  `format_timecode`) rather than counting up from zero, matching how the target audience
+  (composers, editors) already reads elapsed time.
+- A staleness signal: if the stream is `Connected` but has gone quiet for longer than a live
+  connection should (>3s — the idle-reconnect cadence is well under a second; only a genuinely
+  wedged server sitting inside `stream.rs`'s 20s read timeout trips this), the masthead now says
+  so (`⊘ stale`) instead of continuing to display the last known state with unwarranted
+  confidence for up to 20s before a hard `ConnectError` finally fires.
+
+### Fixed
+- The TUI's masthead hardcoded the literal string `"lrex"` as the tool name regardless of which
+  binary name actually launched it — inconsistent with every other surface in this crate (help
+  text, error messages), which all name themselves via `invoked_name()`. It now does the same, so
+  running as `lufs-recorder tui` correctly shows `lufs-recorder`, not `lrex`.
+
+### Known gaps (flagged, not silently assumed away)
+- Same sandbox constraint as v0.5's multi-device work: this was built and verified with **no real
+  audio hardware**. The idle, unreachable, reconnect-on-disconnect, and invoked-name states are
+  all verified against a real, running `serve` process (PTY-driven — see the unit tests in
+  `src/tui/app.rs` and the manual steps added to `TESTING.md` as Test 7). The **live recording
+  state** (meters actually moving, timecode actually advancing against a real take) is only
+  verified against a schema-accurate fixture matching `record.rs`'s real NDJSON progress shape —
+  it has never been watched against a real take. TESTING.md Test 7 closes that gap on real
+  hardware.
+- `lrex tui` is a monitor, not a control surface: it cannot start or stop a take. Agents and
+  scripts should keep using `--json` commands or the HTTP API directly (see `AGENTS.md`); the TUI
+  is for a human watching a take in progress.
+
 ## [0.5.0] - 2026-08-21
 
 ### Added

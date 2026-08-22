@@ -15,11 +15,12 @@ flags any CLI invocation name over 6 characters, and explicitly recommends an al
 breaking rename — for an existing daily-driver tool like this one). `lrex` and `lufs-recorder`
 are the exact same binary under two names; every example below works with either.
 
-**Status: `v0.5` — multi-device recorder with named auto-stop profiles, verified, with a browser
-control UI.** The CLI (`record`, `verify`, `devices`, `selftest`, `init-config`) plus `serve` — a
-local JSON API + a finalized browser front end (Setup · Console · Scope · Glance) with live
-monitoring. A take is captured *and verified against the contract* before it is declared good; a
-take that dropped frames fails by design. `record` can now capture from multiple devices at once
+**Status: `v0.5.1` — multi-device recorder with named auto-stop profiles, verified, with a browser
+control UI and an optional terminal monitor.** The CLI (`record`, `verify`, `devices`, `selftest`,
+`init-config`) plus `serve` — a local JSON API + a finalized browser front end (Setup · Console ·
+Scope · Glance) with live monitoring — plus `tui`, a terminal-native monitor of that same API. A
+take is captured *and verified against the contract* before it is declared good; a take that
+dropped frames fails by design. `record` can now capture from multiple devices at once
 (`--device-track`) and auto-stop on a named profile (`--profile`) instead of a fixed `--duration`.
 
 ## Why it exists
@@ -110,6 +111,11 @@ lrex selftest --json
 lrex serve --port 8777              # then open http://127.0.0.1:8777/
 lrex serve --host 0.0.0.0           # expose on your LAN (other devices)
 lrex serve --frontend ./frontend    # live-edit the UI without rebuilding
+
+# Watch a running `serve` from the terminal: live meters, timecode, connection
+# state. Read-only monitor -- start/stop stays with `record` or the browser UI.
+# Same three standard themes as bplate's wizard (lufs / catppuccin / mono).
+lrex tui --port 8777 --theme catppuccin
 ```
 
 ### HTTP API (for a real frontend)
@@ -138,6 +144,14 @@ The stable endpoint contract:
 The browser is a *control surface*, not the capture engine — multichannel + MIDI capture stay in
 the binary. Recording over HTTP currently drives the `record` subprocess (SIGINT to finalize); the
 API is stable regardless of that detail.
+
+`lrex tui` is a second, terminal-native surface reading this same `GET /api/record/stream` feed —
+also a monitor, not a capture path: it cannot start or stop a take, only watch one already running
+via the CLI or the browser UI. It ships with three runtime-selectable themes
+(`--theme lufs|catppuccin|mono`) shared with `lufs-audio/bplate`'s `wizard`, the first
+implementation of the cross-tool TUI style guide banked at `lufs-audio/bplate`
+`references/studies/tui-style-directions/` — so every LUFS terminal tool reads as one family
+rather than a per-tool palette.
 
 `--channels` groups by token: a range `1-2` is one stereo track, a bare `1` is its own mono track,
 so `1-2,9-10` reproduces the two stereo pairs. `--track NAME=CHANNELS` instead names a track and
@@ -192,6 +206,12 @@ skill in `lufs-audio/bplate`'s `docs/units` style:
 
 **`docs/specs/multi-device-and-voice-call-profiles/`** (in this repo)
 
+The `tui` command (v0.5.1) follows the cross-tool TUI style guide, banked (per Daniel's decision)
+in the `bplate` repo rather than duplicated here since it governs every LUFS terminal tool, not
+just this one:
+
+**`lufs-audio/bplate` → `references/studies/tui-style-directions/`**
+
 ## Roadmap
 
 See [CHANGELOG.md](CHANGELOG.md) for the full version-by-version history. Currently:
@@ -204,8 +224,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version-by-version history. Curren
 - **v0.5** — multi-device concurrent capture (`--device-track`, one sample rate per take, per-device
   verification); named auto-stop profiles + project-scoped config override; the `lrex` short CLI
   alias. *(done — Linux/ALSA concurrent-capture & fault-attribution verified; macOS separate-clock-domain pass open; see `docs/verification-report-v0.5.md` and `TESTING.md`)*
-- **Later** — NDJSON progress polish; FLAC output; optional live spectrograph bands; a TUI (meters/
-  timecode/REC dot), deferred to a cross-tool TUI style guide.
+- **v0.5.1** — `lrex tui`: an optional terminal monitor (live meters, timecode, connection state,
+  a staleness signal) for a running `serve`, with three runtime-selectable themes (LUFS /
+  Catppuccin Mocha / Mono) — the first tool built against the cross-tool TUI style guide banked in
+  `lufs-audio/bplate` `references/studies/tui-style-directions/`. *(done — this release.
+  Recording-state rendering is schema-verified in a sandbox with no audio hardware, not yet
+  watched against a real take — see `TESTING.md` Test 7.)*
+- **Later** — NDJSON progress polish; FLAC output; optional live spectrograph bands.
 - **v1.0** — hardening, macOS + Linux static binaries, CI running the contract end-to-end.
 
 ## License

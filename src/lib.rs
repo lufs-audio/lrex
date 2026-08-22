@@ -18,6 +18,7 @@ mod manifest;
 mod midi;
 mod record;
 mod server;
+mod tui;
 mod verify;
 
 use clap::{CommandFactory, FromArgMatches};
@@ -94,6 +95,7 @@ fn run(cli: &Cli) -> error::Result<()> {
             )
         }
         Command::InitConfig { out, force } => cmd_init_config(cli, out.clone(), *force),
+        Command::Tui { host, port, theme } => tui::run_tui(host.clone(), *port, *theme),
     }
 }
 

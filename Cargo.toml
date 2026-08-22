@@ -1,6 +1,6 @@
 [package]
 name = "lufs-recorder"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.74"
 description = "Universal, agent-first CLI (lufs-recorder / lrex) for recording any audio device's channels plus MIDI to a verified take."
@@ -43,6 +43,11 @@ ringbuf = "0.4"        # lock-free SPSC ring buffer: audio callback -> writer th
 ctrlc = "3"            # clean stop on Ctrl-C, so an interrupted take still finalizes
 
 # `serve` uses only std::net for HTTP (no web framework) to stay self-contained.
+# `tui` (ratatui) is the interactive terminal client of that same HTTP+SSE API —
+# a consumer, not a second capture pipeline. See src/tui/mod.rs.
+ratatui = "0.29"
+crossterm = "0.28"
+
 # libc is only for sending SIGINT to the record subprocess so it finalizes cleanly.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -16,6 +16,11 @@ auto-stop timing in real wall-clock time**, and **the `serve` HTTP API's new `de
 `duration` fields against a live running instance**. `cpal` has no null-device test backend, so
 none of that is fakeable — it needs a real machine. That's what this runbook closes.
 
+v0.5.1 adds `lrex tui`, a terminal monitor of `serve`'s existing status/stream API. It was built
+and verified the same way — see Test 7 for the one real-hardware gap it has (watching a **live**
+take; the idle/unreachable/reconnect states are already PTY-verified against a real `serve`
+process, not just unit-tested).
+
 Each step below has an exact command, an **expected result**, and a **stop condition** — if you
 hit the stop condition, don't try to patch the source yourself; capture the evidence (full console
 output, the relevant `take.json`, the exit code) and report it back (see "Reporting back" at the
@@ -25,7 +30,7 @@ end) so any real fix lands as a reviewed PR, not an ad-hoc hotfix on a daily-dri
 
 Do these in order. 1-3 are the never-before-tested, highest-value items; 4-6 are regression/sanity
 checks that *should* be unaffected by v0.5 but are worth confirming on real hardware since nothing
-here ran there before either.
+here ran there before either; 7 is v0.5.1's one real-hardware gap.
 
 1. **Multi-device capture** (Test 3) — the flagship test. Highest priority by far.
 2. **Named profile auto-stop timing** (Test 4) — never run in real wall-clock time.
@@ -33,6 +38,8 @@ here ran there before either.
 4. Baseline single-device regression (Test 2).
 5. Project-scoped config override, for real (Test 5).
 6. `lrex` alias sanity (Test 1) — lowest risk, but quick, do it first as a sanity gate.
+7. **TUI live monitoring** (Test 7) — confirms `lrex tui`'s meters/timecode against a real take;
+   everything about it was schema-verified in a sandbox, never watched against real audio.
 
 ## Prerequisites
 
@@ -73,8 +80,8 @@ platform-specific linking issue), which would be valuable to know precisely, not
 ./target/release/lufs-recorder --help | head -3
 ```
 
-**Expected:** `lrex --version` prints `lrex 0.5.0`; `lufs-recorder --version` prints
-`lufs-recorder 0.5.0`; each `--help`'s `Usage:` line names the binary it was actually invoked as.
+**Expected:** `lrex --version` prints `lrex 0.5.1`; `lufs-recorder --version` prints
+`lufs-recorder 0.5.1`; each `--help`'s `Usage:` line names the binary it was actually invoked as.
 **Stop condition:** either binary reports the wrong name for itself. This was verified in the
 sandbox already, so a failure here on real hardware would be surprising and worth flagging clearly.
 
@@ -232,6 +239,63 @@ kill %1   # stop the serve process
 **Expected:** `/stop` returns `{"stopped":true,"id":"...","take":{...,"verification":{"verified":true,...}}}`.
 **Stop condition:** the 400 test returns anything other than 400, or the record/stop cycle doesn't
 produce a verified take — report the exact HTTP status + body for whichever step failed.
+
+## Test 7 — TUI live monitoring during a real take
+
+`lrex tui` (added in v0.5.1) is a terminal monitor of `serve`'s existing status/stream API — no
+new capture code, but its rendering of a **live** recording has only ever been tested against a
+schema-accurate fixture, never a real take. This closes that gap. (The idle/unreachable/reconnect
+states, and the masthead correctly naming itself under both binary names, are already verified in
+the sandbox against a real running `serve` — see the PTY-driven checks referenced in the PR — so
+this test is specifically about the one thing that couldn't be: real, moving meters.)
+
+```sh
+./target/release/lrex serve --port 8777 &
+sleep 1
+./target/release/lrex tui --port 8777 --theme lufs
+```
+
+With the TUI running, from a second terminal start a real take over the API (or use the `serve`
+browser UI at `http://127.0.0.1:8777/` to start one):
+
+```sh
+curl -s -X POST http://127.0.0.1:8777/api/record/start \
+  -d '{"channels":"1-2","midi":"off","name":"tui-watch-test"}'
+```
+
+**Expected:** within ~1s of starting, the TUI's masthead/body flips from the idle "waiting for a
+recording" state to a live view: per-track meter bars that visibly move with real input level,
+timecode advancing from `01:00:00.00` in real wall-clock time (not stuck, not racing ahead), and
+the take's name shown in the masthead. Speak or play something into the input device partway
+through and confirm the meters respond within a fraction of a second (the underlying SSE pushes
+~12x/s).
+
+Stop the take from the other terminal:
+
+```sh
+curl -s -X POST http://127.0.0.1:8777/api/record/stop
+```
+
+**Expected:** the TUI drops back to the idle state within ~1s (the same "waiting for a recording"
+view Test 6 already exercises against a real server) rather than freezing on the last live frame.
+Press `q` in the TUI to exit (expect exit `0`), then `kill %1` to stop `serve`.
+
+**Also worth a quick look while it's running:** switch `--theme` (rerun with `catppuccin` and
+`mono`) and confirm the meters/state are equally readable in each — the `mono` theme in particular
+should never rely on color alone (every state also carries a distinct glyph: `○◐✓✗⊘`).
+
+**Bonus, not required:** the TUI also has a staleness signal — if it's connected but hasn't heard
+from `serve` in 3+ seconds it shows `⊘ stale` in the masthead. This should only ever be
+observable if `serve` itself hangs (e.g. `kill -STOP` the `serve` process briefly, then
+`kill -CONT` it); it should **not** appear during normal idle reconnect cycling or normal
+recording. Not gating — this is a genuinely rare path to hit, mention it in your report only if
+you happen to see it unexpectedly.
+
+**Stop condition:** the TUI hangs instead of showing "waiting for a recording" after `/stop`;
+meters never move despite real input; timecode drifts or resets; `⊘ stale` appears during normal
+operation (that would mean the 3s threshold is too tight for real network/scheduling jitter).
+Report the exact `--theme` used, a description (or screenshot/terminal recording, if easy) of what
+rendered, and whether `q` still exited cleanly.
 
 ## Reporting back
 

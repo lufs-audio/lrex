@@ -68,6 +68,27 @@ pub enum Command {
         frontend: Option<PathBuf>,
     },
 
+    /// Live meter/timecode/log terminal client of `serve`'s own SSE stream
+    /// (`GET /api/record/stream`). A monitor, not a second capture pipeline
+    /// or a control surface -- start/stop recording with `record` or the web
+    /// UI; this just watches. `serve` must already be running.
+    Tui {
+        /// Host `serve` is bound to.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port `serve` is bound to.
+        #[arg(long, default_value_t = 8777)]
+        port: u16,
+
+        /// Color theme: lufs, catppuccin, or mono (the accessibility-focused
+        /// standard -- no hue, state conveyed via glyph + word only). Same
+        /// three themes as `lufs-audio/bplate`'s wizard, for one LUFS TUI
+        /// family rather than a per-tool palette.
+        #[arg(long, value_enum, default_value = "lufs")]
+        theme: crate::tui::ThemeKind,
+    },
+
     /// Write a commented default config (maxpatch parity) so you can edit the
     /// device, MIDI port, and output folder for this machine.
     InitConfig {
