@@ -203,8 +203,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version-by-version history. Curren
   browser front end (Setup · Console · Scope · Glance). *(done)*
 - **v0.5** — multi-device concurrent capture (`--device-track`, one sample rate per take, per-device
   verification); named auto-stop profiles + project-scoped config override; the `lrex` short CLI
-  alias. *(done — this release. Not yet verified against real multi-device hardware; see
-  `docs/specs/multi-device-and-voice-call-profiles/SPEC.md` §6.)*
+  alias. *(done — Linux/ALSA concurrent-capture & fault-attribution verified; macOS separate-clock-domain pass open; see `docs/verification-report-v0.5.md` and `TESTING.md`)*
 - **Later** — NDJSON progress polish; FLAC output; optional live spectrograph bands; a TUI (meters/
   timecode/REC dot), deferred to a cross-tool TUI style guide.
 - **v1.0** — hardening, macOS + Linux static binaries, CI running the contract end-to-end.
