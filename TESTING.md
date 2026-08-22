@@ -168,16 +168,16 @@ auto_stop_minutes = 0.1
 buffer_minutes = 0.05
 ```
 
-(Total expected duration: `(0.1 + 2*0.05) * 60` = 18 seconds — short on purpose so this test
+(Total expected duration: `(0.1 + 2*0.05) * 60` = 12 seconds — short on purpose so this test
 doesn't take an hour.)
 
 ```sh
 time ./target/release/lrex record --channels 1-2 --midi off --profile quick-test --name profile-test
 ```
 
-**Expected:** the command runs for **approximately 18 seconds** (allow a couple seconds either way
+**Expected:** the command runs for **approximately 12 seconds** (allow a couple seconds either way
 for process start/stop overhead) and **exits on its own** — you should not need to press Ctrl-C.
-Exit `0`, `verified: true`, and `take.json`'s `requested.duration_s` ≈ 18.
+Exit `0`, `verified: true`, and `take.json`'s `requested.duration_s` ≈ 12.
 **Stop condition:** if it doesn't auto-stop within ~30s, press Ctrl-C and report what happened.
 The sandbox's 9 profile-math unit tests only prove the *arithmetic* — they can't prove
 `record::run()` actually threads the resulting duration into a live capture loop's stop condition,
