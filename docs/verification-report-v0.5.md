@@ -3,7 +3,7 @@
 **Date:** 2026-08-21  
 **Target:** `v0.5.0` (commit `a2d4f82`)  
 **Runbook:** `TESTING.md` (priority order 1–6)  
-**Status:** **ALL TESTS PASS (6/6)** — Multi-device capture, named profile auto-stop, and live HTTP API verified on real audio endpoints.
+**Status:** **LINUX / ALSA ENDPOINTS VERIFIED (6/6)** — Multi-device concurrent capture, fault attribution, named profile auto-stop timing, and live HTTP API verified on real ALSA/PipeWire endpoints. (macOS multi-clock-domain verification remains open).
 
 ---
 
@@ -14,7 +14,9 @@ Prior to this test pass, all 41 unit tests, clippy/fmt checks, and simulated CLI
 2. **Named auto-stop profile timing** in real wall-clock time.
 3. **Live `serve` HTTP API** (`devices`, `profile`, and synchronous validation).
 
-Following the runbook in `TESTING.md`, all 6 test scenarios were executed against real audio backends. All test cases passed with exit code `0` (or expected HTTP `400` / exit `5` failure modes on intentional fault injection).
+Following the runbook in `TESTING.md`, all 6 test scenarios were executed against real audio backends on Linux (ALSA/PipeWire). All test cases passed with exit code `0` (or expected HTTP `400` / exit `5` failure modes on intentional fault injection).
+
+**Scope & Clock Domain Note:** On this Linux host, `pipewire`, `default`, and `pulse` are distinct ALSA endpoints routing through the PipeWire audio graph, sharing an underlying system clock. This proves the concurrent orchestration, ring-buffer threading, and per-device failure attribution paths against real audio I/O. Verification against genuinely asynchronous, independently-clocked devices (e.g. BlackHole 2ch + 16ch on macOS) remains an open target for a macOS hardware pass.
 
 ---
 
@@ -193,81 +195,195 @@ Following the runbook in `TESTING.md`, all 6 test scenarios were executed agains
     tracka.wav — peak -21.3 dBFS
     trackb.wav — peak -21.3 dBFS
   ```
-- **`take.json` Manifest:**
+- **`take.json` Manifest (`2026-08-21_213100_multidevice-test/take.json`):**
   ```json
   {
     "schema_version": 3,
     "tool_version": "0.5.0",
-    "take_id": "rec-05bf2fc2",
-    "created": "2026-08-22T02:30:50Z",
+    "take_id": "rec-2fd5c16d",
+    "created": "2026-08-22T02:31:00Z",
     "requested": {
-      "devices": ["pipewire", "default"],
+      "devices": [
+        "pipewire",
+        "default"
+      ],
       "tracks": [
-        { "name": "trackA", "device": "pipewire", "channels": [1, 2] },
-        { "name": "trackB", "device": "default", "channels": [1, 2] }
+        {
+          "name": "trackA",
+          "device": "pipewire",
+          "channels": [
+            1,
+            2
+          ]
+        },
+        {
+          "name": "trackB",
+          "device": "default",
+          "channels": [
+            1,
+            2
+          ]
+        }
       ],
       "rate": 48000,
       "bit_depth": "24",
       "midi": [],
-      "duration_s": 5.0
+      "duration_s": 8.0
     },
     "captured": {
-      "devices": ["pipewire", "default"],
+      "devices": [
+        "pipewire",
+        "default"
+      ],
       "rate": 48000,
       "bit_depth": "24",
       "channels": 4,
-      "frames": 239616,
-      "duration_s": 4.992,
+      "frames": 385024,
+      "duration_s": 8.021333333333333,
       "xruns": 0,
       "xruns_by_device": [
-        { "device": "pipewire", "xruns": 0 },
-        { "device": "default", "xruns": 0 }
+        {
+          "device": "pipewire",
+          "xruns": 0
+        },
+        {
+          "device": "default",
+          "xruns": 0
+        }
       ],
-      "audio_t0_monotonic_ns": 73101686,
+      "audio_t0_monotonic_ns": 67464718,
       "input_latency_frames": 0,
-      "midi_anchor_ns": 73101686,
+      "midi_anchor_ns": 67464718,
       "midi_events": 0,
-      "av_offset_ms": 73.101686
+      "av_offset_ms": 67.464718
     },
     "tracks": [
       {
         "file": "tracka.wav",
         "device": "pipewire",
-        "channels": [1, 2],
-        "peak_dbfs": -20.560574,
-        "rms_dbfs": -35.347572
+        "channels": [
+          1,
+          2
+        ],
+        "peak_dbfs": -21.316345,
+        "rms_dbfs": -35.27915
       },
       {
         "file": "trackb.wav",
         "device": "default",
-        "channels": [1, 2],
-        "peak_dbfs": -20.560574,
-        "rms_dbfs": -35.354607
+        "channels": [
+          1,
+          2
+        ],
+        "peak_dbfs": -21.316345,
+        "rms_dbfs": -35.27613
       }
     ],
     "verification": {
       "verified": true,
       "checks": [
-        { "name": "files_exist_nonempty", "ok": true, "gating": true },
-        { "name": "audio_decodes", "ok": true, "gating": true },
-        { "name": "channel_count_matches", "ok": true, "gating": true },
-        { "name": "sample_rate_matches", "ok": true, "gating": true },
-        { "name": "bit_depth_matches", "ok": true, "gating": true },
-        { "name": "device_files_exist_nonempty", "ok": true, "gating": true },
-        { "name": "device_audio_decodes", "ok": true, "gating": true },
-        { "name": "device_rate_matches", "ok": true, "gating": true },
-        { "name": "device_bit_depth_matches", "ok": true, "gating": true },
-        { "name": "device_files_exist_nonempty", "ok": true, "gating": true },
-        { "name": "device_audio_decodes", "ok": true, "gating": true },
-        { "name": "device_rate_matches", "ok": true, "gating": true },
-        { "name": "device_bit_depth_matches", "ok": true, "gating": true },
-        { "name": "duration_sane", "ok": true, "gating": true },
-        { "name": "no_xruns", "ok": true, "gating": true },
-        { "name": "device_no_xruns", "ok": true, "gating": true },
-        { "name": "device_no_xruns", "ok": true, "gating": true },
-        { "name": "loudness_not_silent", "ok": true, "gating": true },
-        { "name": "not_clipping", "ok": true, "gating": false, "detail": "loudest track peak -20.6 dBFS" },
-        { "name": "av_offset_within_tol", "ok": true, "gating": false, "detail": "no MIDI armed; A/V alignment not applicable" }
+        {
+          "name": "files_exist_nonempty",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "audio_decodes",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "channel_count_matches",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "sample_rate_matches",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "bit_depth_matches",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_files_exist_nonempty",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_audio_decodes",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_rate_matches",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_bit_depth_matches",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_files_exist_nonempty",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_audio_decodes",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_rate_matches",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_bit_depth_matches",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "duration_sane",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "no_xruns",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_no_xruns",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "device_no_xruns",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "loudness_not_silent",
+          "ok": true,
+          "gating": true
+        },
+        {
+          "name": "not_clipping",
+          "ok": true,
+          "gating": false,
+          "detail": "loudest track peak -21.3 dBFS"
+        },
+        {
+          "name": "av_offset_within_tol",
+          "ok": true,
+          "gating": false,
+          "detail": "no MIDI armed; A/V alignment not applicable"
+        }
       ]
     }
   }
@@ -450,6 +566,8 @@ Following the runbook in `TESTING.md`, all 6 test scenarios were executed agains
 
 ## 4. Observations & Notes
 
-1. **Typo in `TESTING.md` formula comment:** In `TESTING.md` Test 4, the explanatory comment `(0.1 + 2*0.05) * 60 = 18 seconds` contains an arithmetic typo (`(0.1 + 0.1) * 60 = 12 seconds`). The Rust code arithmetic was correct and auto-stopped at precisely 12.0s.
-2. **ALSA Backend Considerations:** When selecting devices on Linux with ALSA/PipeWire, using `default` or `pipewire` avoids the user-space buffer overflow characteristics seen with the ALSA `pulse` emulation plugin.
-3. **Crate / Package Naming:** `Cargo.toml` repository URL matches `https://github.com/lufs-audio/lrex`. `Cargo.lock` is updated to `v0.5.0`.
+1. **Manifest Alignment in Test 3:** Initial report draft referenced the earlier 5s multi-device trial manifest (`rec-05bf2fc2`); updated above with the canonical 8.02s run manifest (`rec-2fd5c16d`, 385,024 frames, matching the console log).
+2. **Clock Domain & Platform Scope Caveat:** The Linux test environment validated concurrent multi-threading, independent SPSC ring buffers, multiple WAV file streams, and per-device error attribution against live ALSA endpoints. However, on Linux with PipeWire, `pipewire` and `default` share an underlying daemon clock domain. Testing across genuinely separate physical/virtual audio clock domains (e.g. BlackHole 2ch mic + BlackHole 16ch call audio on macOS) remains an open target for a macOS hardware verification pass.
+3. **Typo in `TESTING.md` formula comment:** In `TESTING.md` Test 4, the explanatory comment `(0.1 + 2*0.05) * 60 = 18 seconds` contained an arithmetic typo (`(0.1 + 0.1) * 60 = 12 seconds`). The Rust code arithmetic was correct and auto-stopped at precisely 12.0s.
+4. **ALSA Backend Considerations:** When selecting devices on Linux with ALSA/PipeWire, using `default` or `pipewire` avoids the user-space buffer overflow characteristics seen with the ALSA `pulse` emulation plugin.
+5. **Crate / Package Naming:** `Cargo.toml` repository URL matches `https://github.com/lufs-audio/lrex`. `Cargo.lock` is synchronized to `v0.5.0`.

@@ -115,7 +115,8 @@ would need either real hardware (BlackHole or similar) or a purpose-built cpal
 test harness — neither exists yet. This is the same category of limitation
 already on record for `lufs-recorder`'s TESTING.md-style hardware gaps and
 `photo-process-registry`'s pointer-grab limitation: real, named, not silently
-assumed away. *(Update 2026-08-21: hardware verification pass executed and passed;
+assumed away. *(Update 2026-08-21: Linux/ALSA concurrent-capture and fault-attribution
+pass executed and passed; macOS separate-clock-domain verification remains open;
 see `docs/verification-report-v0.5.md`).*
 
 ## 7. Units of Work
@@ -135,7 +136,7 @@ test or direct CLI run) as of this PR:
       exit (CLI) — never a silent fallback.
 - [x] `take.json`'s schema (v3) attributes every track to its source device and
       breaks xrun counts down per device — verified via fabricated-manifest
-      tests and real hardware capture (see `docs/verification-report-v0.5.md`).
+      tests and real Linux/ALSA hardware capture (see `docs/verification-report-v0.5.md`).
 - [x] Existing single-device, no-profile callers are unaffected — regression
       tests plus a full `cargo test` pass (41/41) plus manual CLI dry-runs.
 - [x] A project-local `.lufs-recorder.toml`, when present, overrides the global
