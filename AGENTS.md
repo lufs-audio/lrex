@@ -46,8 +46,23 @@ lrex devices --json      # inventory of audio devices/channels + MIDI ports
 zero-length recording, a wrong channel count, or a single xrun fails the contract by design — a
 recording that "ran" is not a recording that is *right*.
 
+## Interactive TUI (a human surface, not an agent one)
+
+`lrex tui` / `lufs-recorder tui` (v0.5.1) is a terminal monitor for a **human** watching a take in
+progress — live meters, timecode, connection state. It is explicitly outside the agent-facing
+contract above:
+
+- It cannot start or stop a take. It only reads the same `GET /api/record/stream` SSE feed
+  `serve` already exposes — no new endpoints, no new capture path.
+- An agent should keep using `--json` commands or the HTTP API directly; never screen-scrape the
+  TUI's rendered output, which is unstable by nature (themed, laid out for a human eye) unlike the
+  `--json` schema, which is the actual stable contract.
+- `--theme lufs|catppuccin|mono` only affects this human-facing rendering; it has no bearing on
+  anything an agent consumes.
+
 ## Design reference
 
 Full spec and rationale: `lufs-audio/kb` → `docs/product/lufs-recorder/`. The multi-device +
 named-profiles feature (v0.5) has its own spec in this repo:
-`docs/specs/multi-device-and-voice-call-profiles/`.
+`docs/specs/multi-device-and-voice-call-profiles/`. The `tui` command (v0.5.1) follows the
+cross-tool TUI style guide banked in `lufs-audio/bplate` → `references/studies/tui-style-directions/`.
