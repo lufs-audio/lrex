@@ -14,11 +14,47 @@ use std::collections::BTreeSet;
 pub struct AudioDeviceInfo {
     pub name: String,
     pub is_default: bool,
+    /// True for the virtual `monitor` entry (system output loopback), false for
+    /// every physical input device. Absent from an older inventory ⇒ false.
+    #[serde(default)]
+    pub is_monitor: bool,
     pub max_input_channels: u16,
     pub default_sample_rate: u32,
     pub default_sample_format: String,
     pub sample_rate_range: [u32; 2],
     pub sample_formats: Vec<String>,
+}
+
+/// Reserved device keywords that mean "capture the system output loopback"
+/// rather than a physical input. Matched case-insensitively.
+pub const MONITOR_DEVICE_ALIASES: &[&str] = &["monitor", "desktop", "loopback"];
+
+/// Whether `query` is a request for the system monitor/loopback device.
+pub fn is_monitor_query(query: &str) -> bool {
+    let q = query.trim().to_ascii_lowercase();
+    MONITOR_DEVICE_ALIASES.contains(&q.as_str())
+}
+
+/// Whether monitor/loopback capture is a supported concept on this platform.
+pub fn monitor_supported() -> bool {
+    cfg!(any(target_os = "linux", target_os = "macos"))
+}
+
+/// The virtual `monitor` inventory entry. Its format fields are intentionally
+/// `0`/`unknown`: the concrete format is the resolved sink monitor's, known
+/// only once a live session is queried at capture time — reporting a made-up
+/// rate here would be dishonest.
+fn virtual_monitor_info() -> AudioDeviceInfo {
+    AudioDeviceInfo {
+        name: MONITOR_DEVICE_ALIASES[0].to_string(),
+        is_default: false,
+        is_monitor: true,
+        max_input_channels: 0,
+        default_sample_rate: 0,
+        default_sample_format: "unknown".to_string(),
+        sample_rate_range: [0, 0],
+        sample_formats: Vec::new(),
+    }
 }
 
 /// The format/channel choice made for a capture stream.
@@ -111,6 +147,12 @@ pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>> {
     let default_name = host.default_input_device().and_then(|d| d.name().ok());
 
     let mut out = Vec::new();
+    // Advertise the virtual monitor first (on platforms where it means
+    // something) so an agent can discover the reserved `monitor` keyword from
+    // `devices --json` without prior knowledge.
+    if monitor_supported() {
+        out.push(virtual_monitor_info());
+    }
     for dev in host.input_devices().context("enumerating input devices")? {
         let name = dev.name().unwrap_or_else(|_| "<unknown>".to_string());
 
@@ -138,6 +180,7 @@ pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>> {
 
         out.push(AudioDeviceInfo {
             is_default: default_name.as_deref() == Some(name.as_str()),
+            is_monitor: false,
             name,
             max_input_channels: max_ch,
             default_sample_rate: def_sr,
@@ -149,9 +192,13 @@ pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>> {
     Ok(out)
 }
 
-/// Resolve a device by "default", exact name, or case-insensitive substring.
-/// Returns a human message on failure (mapped to exit 3 by the caller).
+/// Resolve a device by the reserved monitor keyword, "default", exact name, or
+/// case-insensitive substring. Returns a human message on failure (mapped to
+/// exit 3 by the caller).
 pub fn resolve_input_device(query: &str) -> std::result::Result<cpal::Device, String> {
+    if is_monitor_query(query) {
+        return resolve_monitor_device();
+    }
     let host = cpal::default_host();
     if query == "default" {
         return host
@@ -178,6 +225,150 @@ pub fn resolve_input_device(query: &str) -> std::result::Result<cpal::Device, St
         return Ok(d.clone());
     }
     Err(format!("audio input device '{query}' not found"))
+}
+
+/// Resolve the system's active output monitor/loopback to a cpal input device,
+/// without requiring the caller to set `PULSE_SOURCE` by hand or to change the
+/// system-wide default input source.
+///
+/// Linux: queries the active default sink, derives its `<sink>.monitor` source,
+/// and returns the cpal input device that carries it (an exact monitor source,
+/// a `monitor`-named device, or the PulseAudio/pipewire-pulse ALSA bridge —
+/// pointed at the source via `PULSE_SOURCE` for the user). macOS: returns an
+/// installed loopback device (BlackHole/Loopback/Soundflower), or the exact
+/// install-guidance message when none is present. Anywhere else: an explicit
+/// unsupported-platform error. Every failure is a named message (mapped to
+/// exit 3 by the caller), never a silent fallback to the physical microphone.
+pub fn resolve_monitor_device() -> std::result::Result<cpal::Device, String> {
+    #[cfg(target_os = "linux")]
+    let resolved = linux_resolve_monitor_device();
+    #[cfg(target_os = "macos")]
+    let resolved = macos_resolve_monitor_device();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let resolved = Err(
+        "monitor/loopback capture is not supported on this platform; choose a physical input \
+         device"
+            .to_string(),
+    );
+    resolved
+}
+
+/// Pure matcher for the Linux monitor device: the index of the cpal input
+/// device that carries the system monitor, given candidate device names and the
+/// resolved monitor `source` (`<sink>.monitor`) / `sink`. Priority: an exact
+/// `source` match, then any `monitor`-named device, then the PulseAudio /
+/// pipewire-pulse ALSA bridge (`pulse`). `None` when nothing can carry it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Linux resolution + tests
+pub fn match_monitor_device_name(names: &[String], source: &str, _sink: &str) -> Option<usize> {
+    if let Some(i) = names.iter().position(|n| n.eq_ignore_ascii_case(source)) {
+        return Some(i);
+    }
+    if let Some(i) = names
+        .iter()
+        .position(|n| n.to_lowercase().contains("monitor"))
+    {
+        return Some(i);
+    }
+    names
+        .iter()
+        .position(|n| n.to_lowercase().contains("pulse"))
+}
+
+/// Pure matcher for the macOS loopback device: the first installed system
+/// loopback driver (BlackHole / Loopback / Soundflower), if any.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // macOS resolution + tests
+pub fn find_loopback_device_name(names: &[String]) -> Option<usize> {
+    names.iter().position(|n| {
+        let l = n.to_lowercase();
+        l.contains("blackhole") || l.contains("loopback") || l.contains("soundflower")
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_resolve_monitor_device() -> std::result::Result<cpal::Device, String> {
+    let sink = detect_default_sink()?;
+    let source = format!("{sink}.monitor");
+    let host = cpal::default_host();
+    let devices: Vec<cpal::Device> = host
+        .input_devices()
+        .map_err(|e| format!("enumerating input devices: {e}"))?
+        .collect();
+    let names: Vec<String> = devices
+        .iter()
+        .map(|d| d.name().unwrap_or_default())
+        .collect();
+    match match_monitor_device_name(&names, &source, &sink) {
+        Some(i) => {
+            // A bridge device (not the monitor source itself) routes through
+            // PULSE_SOURCE; set it for the user instead of asking them to export
+            // it by hand. This is scoped to THIS process and does not touch the
+            // system-wide default input source.
+            if !names[i].eq_ignore_ascii_case(&source) {
+                std::env::set_var("PULSE_SOURCE", &source);
+            }
+            Ok(devices[i].clone())
+        }
+        None => Err(format!(
+            "monitor capture unavailable: resolved monitor source '{source}' for default sink \
+             '{sink}', but no cpal input device exposes it (no '{source}', no 'monitor' device, \
+             and no PulseAudio/pipewire-pulse ALSA bridge). Is PipeWire/PulseAudio running with an \
+             active default sink?"
+        )),
+    }
+}
+
+/// The active default sink name, via the PulseAudio/PipeWire compatibility CLI
+/// (`pactl get-default-sink`). A named error (never a silent fallback) when
+/// there is no live server.
+#[cfg(target_os = "linux")]
+fn detect_default_sink() -> std::result::Result<String, String> {
+    match std::process::Command::new("pactl")
+        .arg("get-default-sink")
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let sink = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if sink.is_empty() {
+                Err(
+                    "no live PipeWire/PulseAudio default sink detected: `pactl get-default-sink` \
+                     returned an empty name"
+                        .to_string(),
+                )
+            } else {
+                Ok(sink)
+            }
+        }
+        Ok(out) => Err(format!(
+            "no live PipeWire/PulseAudio server detected: `pactl get-default-sink` failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => Err(format!(
+            "no live PipeWire/PulseAudio server detected: could not run `pactl` ({e}); install \
+             pipewire-pulse/pulseaudio-utils or start a PipeWire session"
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_resolve_monitor_device() -> std::result::Result<cpal::Device, String> {
+    let host = cpal::default_host();
+    let devices: Vec<cpal::Device> = host
+        .input_devices()
+        .map_err(|e| format!("enumerating input devices: {e}"))?
+        .collect();
+    let names: Vec<String> = devices
+        .iter()
+        .map(|d| d.name().unwrap_or_default())
+        .collect();
+    match find_loopback_device_name(&names) {
+        Some(i) => Ok(devices[i].clone()),
+        None => Err(
+            "No loopback audio device found. Install BlackHole (brew install \
+                     blackhole-2ch) to record system audio on macOS."
+                .to_string(),
+        ),
+    }
 }
 
 /// Choose a supported input config that provides at least `max_channel_needed`
@@ -371,6 +562,84 @@ mod tests {
         assert!(is_better_config(&f32_mono, &i16_mono, None));
         assert!(is_better_config(&f32_mono, &i32_mono, None));
         assert!(is_better_config(&i32_mono, &i16_mono, None));
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn monitor_aliases_match_case_insensitively_and_trimmed() {
+        for q in [
+            "monitor",
+            "Monitor",
+            " MONITOR ",
+            "desktop",
+            "Desktop",
+            "loopback",
+            "LOOPBACK",
+        ] {
+            assert!(is_monitor_query(q), "{q:?} should be a monitor query");
+        }
+        for q in [
+            "microphone",
+            "monitors",
+            "monitor x",
+            "desktop-audio",
+            "",
+            "default",
+        ] {
+            assert!(!is_monitor_query(q), "{q:?} should NOT be a monitor query");
+        }
+    }
+
+    #[test]
+    fn monitor_device_name_prefers_exact_source_then_monitor_then_pulse() {
+        // Exact monitor-source name wins over a monitor-named device.
+        let n = names(&["pulse", "alsa_output.pci.monitor", "Some Monitor"]);
+        assert_eq!(
+            match_monitor_device_name(&n, "alsa_output.pci.monitor", "alsa_output.pci"),
+            Some(1)
+        );
+        // A monitor-named device wins over the pulse bridge.
+        let n = names(&["pulse", "Some Monitor"]);
+        assert_eq!(
+            match_monitor_device_name(&n, "sink.monitor", "sink"),
+            Some(1)
+        );
+        // The pulse bridge is the last resort.
+        let n = names(&["Microphone", "pulse"]);
+        assert_eq!(
+            match_monitor_device_name(&n, "sink.monitor", "sink"),
+            Some(1)
+        );
+        // Nothing can carry the monitor: never a silent fallback to the mic.
+        let n = names(&["Microphone", "Line In"]);
+        assert_eq!(match_monitor_device_name(&n, "sink.monitor", "sink"), None);
+    }
+
+    #[test]
+    fn loopback_detection_matches_known_drivers() {
+        assert_eq!(
+            find_loopback_device_name(&names(&["Built-in Microphone", "BlackHole 2ch"])),
+            Some(1)
+        );
+        assert_eq!(
+            find_loopback_device_name(&names(&["Loopback Audio"])),
+            Some(0)
+        );
+        assert_eq!(
+            find_loopback_device_name(&names(&["Built-in Microphone"])),
+            None
+        );
+    }
+
+    #[test]
+    fn monitor_supported_matches_platform() {
+        assert_eq!(
+            monitor_supported(),
+            cfg!(any(target_os = "linux", target_os = "macos"))
+        );
     }
 
     #[test]

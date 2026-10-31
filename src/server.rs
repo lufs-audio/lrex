@@ -66,6 +66,9 @@ struct RecordState {
 struct AppState {
     cfg: Config,
     config_path: Option<PathBuf>,
+    /// Server-level `--preset`: forwarded to every spawned `record` child so a
+    /// take uses the same named configuration the server reports.
+    preset: Option<String>,
     frontend_dir: Option<PathBuf>,
     out_dir: PathBuf,
     exe: PathBuf,
@@ -81,6 +84,7 @@ pub fn serve(
     host: String,
     port: u16,
     frontend_dir: Option<PathBuf>,
+    preset: Option<String>,
     json_out: bool,
 ) -> crate::error::Result<()> {
     let out_dir = cfg.out_path();
@@ -88,6 +92,7 @@ pub fn serve(
     let state = Arc::new(AppState {
         cfg,
         config_path,
+        preset,
         frontend_dir,
         out_dir,
         exe,
@@ -674,7 +679,14 @@ fn api_record_start(state: &AppState, body: &str) -> Result<Value> {
     // `--json` so the child emits NDJSON progress (with per-track levels) that we
     // relay for live monitoring; the take still lands on disk for `stop` to read.
     let mut args: Vec<String> = vec!["--json".to_string(), "record".to_string()];
-    if let Some(p) = &state.config_path {
+    // A preset and a config path are mutually exclusive at the CLI level, so
+    // forward exactly one: the preset when the server was started with one
+    // (the child re-resolves it against the same base config), otherwise the
+    // loaded config path.
+    if let Some(p) = &state.preset {
+        args.push("--preset".to_string());
+        args.push(p.clone());
+    } else if let Some(p) = &state.config_path {
         args.push("--config".to_string());
         args.push(p.display().to_string());
     }

@@ -16,7 +16,10 @@ use sha2::{Digest, Sha256};
 /// gained `xruns_by_device` so a multi-device take's verification can identify
 /// which device failed instead of only reporting one whole-take xrun count.
 /// All-devices-equal-one is still a fully valid (and the most common) shape.
-pub const SCHEMA_VERSION: u32 = 3;
+/// v4: `captured.app` / `tracks[].app` record the isolated PipeWire application
+/// (`record --app <name>`) a take was captured from; absent for every ordinary
+/// device take, so a v3 manifest still parses and verifies unchanged.
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -98,6 +101,12 @@ pub struct Captured {
     /// The residual after this compensation is MIDI transport jitter + the
     /// instrument's own note latency; gated honestly by the loopback fixture.
     pub av_offset_ms: f64,
+    /// The isolated PipeWire application this take was captured from
+    /// (`record --app <name>`, Linux/PipeWire). `None` for every ordinary
+    /// device take, and omitted from the JSON so a v3-shaped manifest is
+    /// produced byte-for-byte when no application capture was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +124,11 @@ pub struct TrackInfo {
     pub channels: Vec<u16>,
     pub peak_dbfs: f32,
     pub rms_dbfs: f32,
+    /// The isolated PipeWire application this track came from, when the take
+    /// was captured via `record --app <name>` (Linux/PipeWire). `None` — and
+    /// omitted from the JSON — for every ordinary device track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,5 +255,36 @@ mod tests {
         assert_eq!(v["devices"].as_array().unwrap().len(), 2);
         assert_eq!(v["tracks"][0]["device"], "BlackHole 2ch");
         assert_eq!(v["tracks"][1]["device"], "BlackHole 16ch");
+    }
+
+    #[test]
+    fn app_metadata_serializes_when_set_and_is_omitted_when_absent() {
+        // A captured application is recorded on both the take (`captured.app`)
+        // and each track (`tracks[].app`).
+        let mut c = Captured {
+            devices: vec!["Brave".into()],
+            rate: 48000,
+            bit_depth: "24".into(),
+            channels: 2,
+            frames: 48000,
+            duration_s: 1.0,
+            xruns: 0,
+            xruns_by_device: vec![DeviceXruns {
+                device: "Brave".into(),
+                xruns: 0,
+            }],
+            audio_t0_monotonic_ns: 0,
+            input_latency_frames: 0,
+            midi_anchor_ns: 0,
+            midi_events: 0,
+            av_offset_ms: 0.0,
+            app: Some("Brave".into()),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["app"], "Brave");
+
+        c.app = None;
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("app").is_none(), "absent app must be omitted");
     }
 }

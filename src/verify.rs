@@ -411,6 +411,7 @@ mod tests {
                 midi_anchor_ns: 0,
                 midi_events: 0,
                 av_offset_ms: 0.0,
+                app: None,
             },
             tracks: vec![],
             midi: None,
@@ -518,6 +519,7 @@ mod tests {
             channels: vec![1, 2],
             peak_dbfs: 0.0,
             rms_dbfs: 0.0,
+            app: None,
         }];
         let v = run(Path::new("/nonexistent-take-dir"), &m);
         let dev_exists = v

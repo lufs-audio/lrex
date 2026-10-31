@@ -33,10 +33,19 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 }
 
+// `Record` legitimately carries the whole `RecordArgs` struct; boxing it would
+// fight clap's derive for no real benefit in a short-lived CLI process.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// List audio input devices + channels and MIDI input ports.
     Devices,
+
+    /// List available named presets (`presets` is shorthand for `presets list`).
+    Presets {
+        #[command(subcommand)]
+        action: Option<PresetsAction>,
+    },
 
     /// Capture audio (+ optional MIDI) to a verified take.
     Record(RecordArgs),
@@ -66,6 +75,11 @@ pub enum Command {
         /// page embedded in the binary — for live frontend iteration.
         #[arg(long, value_name = "DIR")]
         frontend: Option<PathBuf>,
+
+        /// Named preset configuration the server (and the takes it spawns)
+        /// should use. See `presets`. Mutually exclusive with --config.
+        #[arg(long, conflicts_with = "config", value_name = "NAME")]
+        preset: Option<String>,
     },
 
     /// Live meter/timecode/log terminal client of `serve`'s own SSE stream
@@ -179,9 +193,54 @@ pub struct RecordArgs {
     #[arg(long)]
     pub profile: Option<String>,
 
+    /// Named preset configuration to load (see `presets`). Resolved from
+    /// ~/.config/lrex/presets/<name>.toml, then ~/.config/lufs-recorder/…, then
+    /// an inline [presets.<name>] table in the active config. Explicit flags
+    /// (--device, --rate, …) still override the preset's values. Mutually
+    /// exclusive with --config.
+    #[arg(long, conflicts_with = "config", value_name = "NAME")]
+    pub preset: Option<String>,
+
+    /// Isolate audio from a specific application (Linux/PipeWire only), matched
+    /// case-insensitively against the app's `application.name` /
+    /// `application.process.binary`. Supersedes --device; mutually exclusive
+    /// with --device-track.
+    #[arg(long, conflicts_with = "device_track", value_name = "NAME")]
+    pub app: Option<String>,
+
     /// Validate + predict the take without capturing anything.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// `presets` subcommand actions. Bare `lrex presets` is equivalent to
+/// `lrex presets list`.
+#[derive(Subcommand, Debug)]
+pub enum PresetsAction {
+    /// List all available presets (files + inline `[presets.<name>]` tables).
+    List,
+}
+
+/// `--config`/`--preset` mutual exclusion, for the order clap cannot catch.
+///
+/// clap's `conflicts_with` only sees arguments in the *same* command, so a
+/// global `--config` given *before* the subcommand (`lrex --config x record
+/// --preset foo`) is not detected against a subcommand-local `--preset` — even
+/// though both orders mean the same thing. The `conflicts_with` on `--preset`
+/// catches the after-subcommand order; this catches the other. `run_cli`
+/// converts the message into a clap `ArgumentConflict` error so the exit code
+/// stays 2 either way. Returns `None` when there is no conflict.
+pub fn config_preset_conflict(cli: &Cli) -> Option<String> {
+    let preset = match &cli.command {
+        Command::Record(a) => a.preset.as_deref(),
+        Command::Serve { preset, .. } => preset.as_deref(),
+        _ => None,
+    };
+    if cli.config.is_some() && preset.is_some() {
+        Some("the argument '--config <FILE>' cannot be used with '--preset <NAME>'".to_string())
+    } else {
+        None
+    }
 }
 
 /// Parse a channel spec into grouped, 1-based channel lists.
@@ -310,6 +369,82 @@ pub fn default_track_name(channels: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn record_accepts_preset_flag() {
+        let cli = Cli::try_parse_from(["lrex", "record", "--preset", "dante"]).unwrap();
+        match cli.command {
+            Command::Record(a) => assert_eq!(a.preset.as_deref(), Some("dante")),
+            other => panic!("expected record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preset_and_config_are_mutually_exclusive() {
+        // After-subcommand order: clap's own `conflicts_with` catches it.
+        let after =
+            Cli::try_parse_from(["lrex", "record", "--preset", "foo", "--config", "x.toml"]);
+        assert!(after.is_err(), "--config after subcommand must conflict");
+
+        // Before-subcommand order: clap does not cross command boundaries, so
+        // the explicit check must catch it (and it is still an error).
+        let before =
+            Cli::try_parse_from(["lrex", "--config", "x.toml", "record", "--preset", "foo"])
+                .expect("parses (conflict is enforced explicitly)");
+        assert!(config_preset_conflict(&before).is_some());
+
+        // Either flag alone is fine.
+        let only_preset = Cli::try_parse_from(["lrex", "record", "--preset", "foo"]).unwrap();
+        assert!(config_preset_conflict(&only_preset).is_none());
+        let only_config = Cli::try_parse_from(["lrex", "--config", "x.toml", "record"]).unwrap();
+        assert!(config_preset_conflict(&only_config).is_none());
+        // ...and the same holds for `serve`.
+        let serve = Cli::try_parse_from(["lrex", "--config", "x.toml", "serve", "--preset", "foo"])
+            .unwrap();
+        assert!(config_preset_conflict(&serve).is_some());
+    }
+
+    #[test]
+    fn app_conflicts_with_device_track() {
+        let r = Cli::try_parse_from([
+            "lrex",
+            "record",
+            "--app",
+            "Brave",
+            "--device-track",
+            "BlackHole 2ch:mic=1,2",
+        ]);
+        assert!(r.is_err(), "--app must not combine with --device-track");
+        // ...but --app alone parses.
+        let ok = Cli::try_parse_from(["lrex", "record", "--app", "Brave"]).unwrap();
+        match ok.command {
+            Command::Record(a) => assert_eq!(a.app.as_deref(), Some("Brave")),
+            other => panic!("expected record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn presets_subcommand_bare_and_list_both_parse() {
+        let bare = Cli::try_parse_from(["lrex", "presets"]).unwrap();
+        assert!(matches!(bare.command, Command::Presets { action: None }));
+        let list = Cli::try_parse_from(["lrex", "presets", "list"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Command::Presets {
+                action: Some(PresetsAction::List)
+            }
+        ));
+    }
+
+    #[test]
+    fn serve_accepts_preset_flag() {
+        let cli = Cli::try_parse_from(["lrex", "serve", "--preset", "dante"]).unwrap();
+        match cli.command {
+            Command::Serve { preset, .. } => assert_eq!(preset.as_deref(), Some("dante")),
+            other => panic!("expected serve, got {other:?}"),
+        }
+    }
 
     #[test]
     fn parses_stereo_pairs() {
