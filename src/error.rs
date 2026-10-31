@@ -19,9 +19,9 @@ pub mod code {
     pub const CONTRACT_VIOLATION: u8 = 5;
     /// Interrupted before a valid take was produced.
     pub const INTERRUPTED: u8 = 6;
-    /// Not implemented yet — the honest-failure sentinel. Retained as part of
-    /// the stable taxonomy (v0.1 used it); no v0.2 command constructs it.
-    #[allow(dead_code)]
+    /// Not implemented yet — the honest-failure sentinel. Used when a
+    /// requested capability exists in the surface but its backend does not
+    /// (e.g. `--app` isolated capture without a PipeWire-native capture path).
     pub const NOT_IMPLEMENTED: u8 = 70;
 }
 
@@ -36,6 +36,10 @@ pub enum ExitError {
     ContractViolation(String),
     /// Interrupted before a valid take (exit 6).
     Interrupted(String),
+    /// A requested capability is not implemented in this build/environment
+    /// (exit 70) — the honest-failure sentinel. Nothing reports success it has
+    /// not earned.
+    NotImplemented(String),
     /// Any other error — bad usage falls out as a generic failure (exit 2 via clap,
     /// or 1 here). Carries an [`anyhow::Error`] for context.
     Other(anyhow::Error),
@@ -49,6 +53,7 @@ impl ExitError {
             ExitError::FormatUnsupported(_) => code::FORMAT_UNSUPPORTED,
             ExitError::ContractViolation(_) => code::CONTRACT_VIOLATION,
             ExitError::Interrupted(_) => code::INTERRUPTED,
+            ExitError::NotImplemented(_) => code::NOT_IMPLEMENTED,
             ExitError::Other(_) => 1,
         }
     }
@@ -60,6 +65,7 @@ impl ExitError {
             ExitError::FormatUnsupported(_) => "format_unsupported",
             ExitError::ContractViolation(_) => "contract_violation",
             ExitError::Interrupted(_) => "interrupted",
+            ExitError::NotImplemented(_) => "not_implemented",
             ExitError::Other(_) => "error",
         }
     }
@@ -71,7 +77,8 @@ impl fmt::Display for ExitError {
             ExitError::DeviceUnavailable(m)
             | ExitError::FormatUnsupported(m)
             | ExitError::ContractViolation(m)
-            | ExitError::Interrupted(m) => write!(f, "{m}"),
+            | ExitError::Interrupted(m)
+            | ExitError::NotImplemented(m) => write!(f, "{m}"),
             ExitError::Other(e) => write!(f, "{e:#}"),
         }
     }

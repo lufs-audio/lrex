@@ -16,6 +16,7 @@ mod error;
 mod fixture;
 mod manifest;
 mod midi;
+mod pipewire;
 mod record;
 mod server;
 mod tui;
@@ -60,6 +61,16 @@ pub fn run_cli() -> ExitCode {
         Ok(c) => c,
         Err(e) => e.exit(),
     };
+    // clap's `conflicts_with` cannot see a global `--config` given before the
+    // subcommand against a subcommand-local `--preset`; enforce that order too,
+    // as a clap ArgumentConflict (exit 2) so both orders behave identically.
+    if let Some(msg) = cli::config_preset_conflict(&cli) {
+        Cli::command()
+            .name(prog)
+            .bin_name(prog)
+            .error(clap::error::ErrorKind::ArgumentConflict, msg)
+            .exit();
+    }
     let json = cli.json;
 
     let result = run(&cli);
@@ -83,17 +94,28 @@ fn run(cli: &Cli) -> error::Result<()> {
             host,
             port,
             frontend,
+            preset,
         } => {
             let (cfg, cfg_path) = load_config(cli)?;
+            // A server-level preset selects the config the server reports AND
+            // is forwarded to every `record` child it spawns (see server.rs),
+            // so the UI and its takes agree on one configuration.
+            let cfg = match preset {
+                Some(name) => config::resolve_preset(name, &cfg)
+                    .map_err(|e| ExitError::DeviceUnavailable(format!("{e:#}")))?,
+                None => cfg,
+            };
             server::serve(
                 cfg,
                 cfg_path,
                 host.clone(),
                 *port,
                 frontend.clone(),
+                preset.clone(),
                 cli.json,
             )
         }
+        Command::Presets { action } => cmd_presets(cli, action),
         Command::InitConfig { out, force } => cmd_init_config(cli, out.clone(), *force),
         Command::Tui { host, port, theme } => tui::run_tui(host.clone(), *port, *theme),
     }
@@ -214,6 +236,32 @@ fn cmd_record(cli: &Cli, args: &cli::RecordArgs) -> error::Result<()> {
     }
 }
 
+fn cmd_presets(cli: &Cli, _action: &Option<cli::PresetsAction>) -> error::Result<()> {
+    let (cfg, _path) = load_config(cli)?;
+    let presets = config::list_available_presets(&cfg);
+    if cli.json {
+        let payload = serde_json::json!({ "presets": presets });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).map_err(|e| ExitError::Other(e.into()))?
+        );
+    } else if presets.is_empty() {
+        println!("no presets found");
+        println!(
+            "  add files under ~/.config/lrex/presets/<name>.toml, or a [presets.<name>] table to your config"
+        );
+    } else {
+        println!("Available presets:");
+        for p in &presets {
+            match &p.description {
+                Some(d) => println!("  {} — {d} ({})", p.name, p.source),
+                None => println!("  {} ({})", p.name, p.source),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cmd_verify(take_dir: &std::path::Path, json: bool) -> error::Result<()> {
     let (manifest, verification) = verify::verify_dir(take_dir).map_err(ExitError::Other)?;
     report_take(&manifest, &take_dir.display().to_string(), json)?;
@@ -228,6 +276,7 @@ fn cmd_verify(take_dir: &std::path::Path, json: bool) -> error::Result<()> {
 }
 
 fn cmd_init_config(cli: &Cli, out: Option<std::path::PathBuf>, force: bool) -> error::Result<()> {
+    let explicit_target = out.is_some() || cli.config.is_some();
     let path = out
         .or_else(|| cli.config.clone())
         .or_else(config::default_config_path)
@@ -239,6 +288,24 @@ fn cmd_init_config(cli: &Cli, out: Option<std::path::PathBuf>, force: bool) -> e
             path.display()
         )));
     }
+
+    // Backwards-compat courtesy: when writing the new canonical lrex config
+    // while a legacy lufs-recorder config already exists, say so. The legacy
+    // file is never touched — it keeps working as a read fallback — so there is
+    // nothing to clobber without confirmation.
+    if !explicit_target && !path.exists() {
+        if let Some(legacy) = config::user_config_path(config::CONFIG_DIR_NAMES[1]) {
+            if legacy.exists() {
+                eprintln!(
+                    "note: a legacy config already exists at {} — it is still read as a fallback; \
+                     writing the new {} alongside it (the old file is left untouched).",
+                    legacy.display(),
+                    path.display()
+                );
+            }
+        }
+    }
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ExitError::Other(e.into()))?;
     }

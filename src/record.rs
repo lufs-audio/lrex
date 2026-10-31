@@ -88,6 +88,7 @@ struct DeviceCapture {
     tracks: Vec<(String, Vec<u16>)>,
 }
 
+#[derive(Debug)]
 struct RecordPlan {
     /// One or more devices. A single-device take is `devices.len() == 1` — the
     /// common case, and byte-identical in behavior to v0.2 through v0.4.
@@ -98,9 +99,28 @@ struct RecordPlan {
     out_dir: PathBuf,
     name: Option<String>,
     duration: Option<f64>,
+    /// `record --app <name>`: capture isolated audio from this PipeWire
+    /// application instead of a cpal device. `None` for every ordinary take.
+    app: Option<String>,
 }
 
 fn resolve_plan(cfg: &Config, args: &cli::RecordArgs) -> crate::error::Result<RecordPlan> {
+    // Preset precedence: base config -> preset override -> CLI flags. A preset
+    // is resolved against the already-loaded base config (which itself already
+    // includes any project override); every `args.*` read below still wins, so
+    // explicit flags cleanly override the preset. `--preset`/`--config` mutual
+    // exclusion is enforced by clap before we ever get here.
+    let preset_cfg = match &args.preset {
+        Some(name) => Some(
+            crate::config::resolve_preset(name, cfg)
+                .map_err(|e| ExitError::DeviceUnavailable(format!("{e:#}")))?,
+        ),
+        None => None,
+    };
+    let cfg = preset_cfg.as_ref().unwrap_or(cfg);
+
+    let app = args.app.clone();
+
     let devices: Vec<DeviceCapture> = if !args.device_track.is_empty() {
         // Explicit multi-device: `--device-track` is the sole source of device +
         // track layout when used (clap's `conflicts_with_all` already rejects
@@ -204,7 +224,20 @@ fn resolve_plan(cfg: &Config, args: &cli::RecordArgs) -> crate::error::Result<Re
         out_dir,
         name: args.name.clone(),
         duration,
+        app,
     })
+}
+
+/// Map an [`crate::pipewire::AppCaptureError`] onto the stable exit-code
+/// taxonomy: no matching stream -> exit 3 (unavailable source); everything
+/// else (non-Linux host, no live PipeWire, tooling failure) -> exit 4
+/// (unsupported here). The error text is carried through verbatim.
+fn app_capture_exit(e: crate::pipewire::AppCaptureError) -> ExitError {
+    let msg = e.to_string();
+    match e {
+        crate::pipewire::AppCaptureError::NoMatchingStream(_) => ExitError::DeviceUnavailable(msg),
+        _ => ExitError::FormatUnsupported(msg),
+    }
 }
 
 fn slug(name: &str) -> String {
@@ -319,6 +352,32 @@ pub fn dry_run(
     config_source: Option<&std::path::Path>,
 ) -> crate::error::Result<()> {
     let plan = resolve_plan(cfg, args)?;
+
+    // --app: no cpal device is opened; validate the application's PipeWire
+    // node exists and report it. A non-Linux/no-PipeWire host exits 4 and a
+    // non-playing app exits 3 (see `app_capture_exit`).
+    if let Some(app) = &plan.app {
+        let node = crate::pipewire::resolve_app_playback_node(app).map_err(app_capture_exit)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "dry_run": true,
+                    "app": app,
+                    "pipewire_node_id": node,
+                    "note": "isolated application capture needs a PipeWire-native capture backend; \
+                             this dry-run only validates the source is present",
+                })
+            );
+        } else {
+            println!(
+                "dry-run OK — would capture isolated audio from application '{app}' \
+                 (PipeWire node {node})"
+            );
+        }
+        return Ok(());
+    }
+
     let resolved = resolve_devices(&plan)?;
 
     let midi_ports: Vec<String> = if plan.midi_spec.eq_ignore_ascii_case("off") {
@@ -604,6 +663,24 @@ pub fn run(
     json: bool,
 ) -> crate::error::Result<RecordOutcome> {
     let plan = resolve_plan(cfg, args)?;
+
+    // --app: resolve the application's PipeWire node, then capture in isolation.
+    // The two honest failure modes (exit 4 non-Linux/no-PipeWire; exit 3 no
+    // matching stream) are reported with the contract's exact messages. A
+    // resolved node cannot be captured by this build: linking a capture stream
+    // to a PipeWire node needs a PipeWire-native backend that cpal/ALSA cannot
+    // provide. Rather than capture the whole system mix and mislabel it as
+    // isolated, fail honestly by name (exit 70).
+    if let Some(app) = &plan.app {
+        let node = crate::pipewire::resolve_app_playback_node(app).map_err(app_capture_exit)?;
+        return Err(ExitError::NotImplemented(format!(
+            "--app '{app}': resolved PipeWire node {node}, but isolated application capture \
+             requires a PipeWire-native capture backend (linking a capture stream to the app's \
+             output ports); this build does not include one. Refusing to capture the system mix \
+             instead of pretending it is isolated."
+        )));
+    }
+
     let resolved = resolve_devices(&plan)?;
     // `resolve_devices` already guarantees every entry shares one rate.
     let shared_rate = resolved[0].chosen.sample_rate;
@@ -1000,6 +1077,7 @@ pub fn run(
                 channels,
                 peak_dbfs: peak,
                 rms_dbfs: rms,
+                app: plan.app.clone(),
             });
         }
     }
@@ -1078,6 +1156,7 @@ pub fn run(
         midi_anchor_ns,
         midi_events,
         av_offset_ms: midi_anchor_ns as f64 / 1e6,
+        app: plan.app.clone(),
     };
 
     let mut mfst = Manifest {
@@ -1204,5 +1283,77 @@ mod tests {
             ..RecordArgs::default()
         };
         assert!(resolve_plan(&cfg, &a).is_err());
+    }
+
+    // A collision-proof name: `resolve_plan` uses the real `$HOME` for preset
+    // *file* lookup, so an inline preset under a common name could be shadowed
+    // by a developer's own `~/.config/lrex/presets/<name>.toml`.
+    const TEST_PRESET: &str = "lrex-unit-test-preset-9f3a";
+
+    fn cfg_with_inline_preset() -> Config {
+        let text = format!(
+            r#"
+device = "default"
+rate = "default"
+bit_depth = "24"
+out_dir = "~/x"
+midi_port = "off"
+
+[[tracks]]
+name = "mic"
+channels = [1, 2]
+
+[presets.{TEST_PRESET}]
+device = "BlackHole 2ch"
+rate = "48000"
+"#
+        );
+        toml::from_str(&text).expect("config with inline preset parses")
+    }
+
+    #[test]
+    fn resolve_plan_applies_preset_then_cli_flags_win() {
+        let cfg = cfg_with_inline_preset();
+
+        // Preset alone: its values take effect over the base config.
+        let a = RecordArgs {
+            preset: Some(TEST_PRESET.to_string()),
+            ..RecordArgs::default()
+        };
+        let plan = resolve_plan(&cfg, &a).unwrap();
+        assert_eq!(plan.devices[0].device_query, "BlackHole 2ch");
+        assert_eq!(plan.want_rate, Some(48000));
+
+        // An explicit flag beats the preset (standard CLI precedence).
+        let a = RecordArgs {
+            preset: Some(TEST_PRESET.to_string()),
+            rate: Some(96000),
+            ..RecordArgs::default()
+        };
+        let plan = resolve_plan(&cfg, &a).unwrap();
+        assert_eq!(plan.want_rate, Some(96000), "--rate overrides the preset");
+        assert_eq!(plan.devices[0].device_query, "BlackHole 2ch");
+    }
+
+    #[test]
+    fn resolve_plan_unknown_preset_is_a_device_unavailable_error() {
+        let cfg = Config::default();
+        let a = RecordArgs {
+            preset: Some("definitely-not-a-preset-xyz".to_string()),
+            ..RecordArgs::default()
+        };
+        let err = resolve_plan(&cfg, &a).expect_err("unknown preset must fail");
+        assert_eq!(err.code(), 3, "unknown preset maps to exit 3");
+    }
+
+    #[test]
+    fn resolve_plan_records_app_for_app_capture() {
+        let cfg = Config::default();
+        let a = RecordArgs {
+            app: Some("Brave".to_string()),
+            ..RecordArgs::default()
+        };
+        let plan = resolve_plan(&cfg, &a).unwrap();
+        assert_eq!(plan.app.as_deref(), Some("Brave"));
     }
 }

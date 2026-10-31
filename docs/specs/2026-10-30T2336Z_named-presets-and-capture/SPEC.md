@@ -1,8 +1,13 @@
-# SPEC.md — Named Presets, .lrex.toml Resolution, Native Monitor & App Audio Capture
+# SPEC — `lrex` Phase 2: Named Presets, `.lrex.toml` Resolution, Native Monitor & App Audio Capture
 
-## Status
-Proposed / Ready for review.
+**Status:** Ready for Review  
+**Owner:** Daniel Ramirez  
+**Phase folder:** `docs/specs/2026-10-30T2336Z_named-presets-and-capture/`  
+**Target Repo:** `lufs-audio/lrex`  
+**Previous phases (archived, read-only references):**
+- `docs/specs/multi-device-and-voice-call-profiles/` (v0.5: multi-device capture, named profiles)
 
+---
 ## 1. Problem Statement & Motivation
 `lrex` (`v0.5.1`) is a reliable capture primitive for audio interfaces and MIDI. However, daily workflows frequently switch between distinct recording contexts:
 1. **The Studio Hardware Rig**: The Max/MSP parity setup (physical audio interface, mic on channels 1–2, piano on channels 9–10, 24-bit, MIDI from a physical Nord Stage 3 keyboard).
